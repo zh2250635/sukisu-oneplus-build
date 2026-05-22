@@ -112,20 +112,11 @@ on:
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    # 跑在挂在 WSL 上的 self-hosted runner（label wsl-32c, 32 vCPU），代理已通过 ~/actions-runner/.env 注入
+    runs-on: [self-hosted, linux, x64, wsl, kernel-builder]
 
     steps:
-      - name: Maximize build space
-        uses: easimon/maximize-build-space@master
-        with:
-          root-reserve-mb: 8192
-          temp-reserve-mb: 2048
-          swap-size-mb: 8192
-          remove-dotnet: 'true'
-          remove-android: 'true'
-          remove-haskell: 'true'
-          remove-codeql: 'true'
-
+      # WSL 已挂 1 TB 磁盘且剩余 744 GB，无需 GitHub-hosted 的 maximize-build-space
       - name: Configure Git
         run: |
           git config --global user.name "Numbersf"
@@ -133,8 +124,12 @@ jobs:
 
       - name: Install dependencies
         run: |
-          sudo apt update && sudo apt upgrade -y
-          sudo apt install -y python3 git curl
+          # WSL 上已装好绝大部分依赖，缺啥补啥；用 DEBIAN_FRONTEND 跳过交互
+          sudo DEBIAN_FRONTEND=noninteractive apt-get update -qq
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
+            python3 git curl wget jq bc bison flex zip unzip rsync xz-utils \
+            build-essential libssl-dev libelf-dev cpio kmod ca-certificates \
+            libncurses-dev dos2unix
 
       - name: Show selected inputs debug
         run: |
