@@ -210,22 +210,18 @@ jobs:
           cd kernel_workspace
           if [ -d .repo ]; then
             echo "===== 命中缓存：$CACHE_DIR ====="
-            # 自愈：上次被中断的 sync 可能让 git index 损坏（变 0 字节或残缺），
-            #       即便 reset --hard 也救不回。强制重建所有 project 的 index。
-            echo ">>> 自愈：重建所有 project 的 git index"
-            repo forall -c 'rm -f $(git rev-parse --git-dir)/index 2>/dev/null; git read-tree HEAD 2>/dev/null' || true
+            # 不做 git reset/clean——这两个组合操作过于激进，曾误删根 project 的
+            # .git 元数据导致 "not a git repository: '.repo/projects/..git'"。
+            # 改用 stash：保留 .git 目录完整性，只把 working tree 改动暂存。
+            # 上次 patch 修改的文件、新增的辅助仓库和编译产物都会被 stash/删除。
+            echo ">>> 用 stash 暂存所有 project 的本地修改（保留 .git 完整性）"
+            repo forall -c 'git stash push --include-untracked --quiet --message "ci-cleanup-$(date +%s)" 2>/dev/null || true' || true
 
-            # ⚠️ 根 project (.) 的 working tree 包含 kernel_platform/prebuilts 等子 project
-            #   路径，对它做 git clean -fdx 会破坏嵌套 project，导致下次 checkout 时
-            #   "warning: unable to rmdir ...: Directory not empty / fatal: unable to
-            #   write new index file"。所以根 project 只 reset，不 clean。
-            echo ">>> 复位 project（根仅 reset，子 project 才做 clean）"
-            repo forall -c 'P=$(git rev-parse --show-toplevel); if [ "$P" = "$PWD" ] && [ -d kernel_platform ]; then git reset --hard HEAD 2>/dev/null; else git reset --hard HEAD 2>/dev/null; git clean -fdx 2>/dev/null; fi' || true
-
-            # 仓库根目录的临时辅助文件（patches/dist 等不在任何 git 内）也清掉
+            # repo 不跟踪的文件（patches 复制进来的、AnyKernel3 / KernelSU 等手动 clone）
+            # 不在任何 git 范围内，stash 不到，这里手动清
             rm -rf susfs4ksu SukiSU_patch AnyKernel3 *.zip 2>/dev/null || true
             rm -rf kernel_platform/KernelSU 2>/dev/null || true
-            # bazel-cache 保留（不在任何 git 跟踪范围内，下次编译能重用）
+            # bazel-cache 故意保留——下次编译能直接复用 (~10 GB) 大幅加速
 
             echo ">>> 增量 repo sync"
             if ! repo sync -c -j$(nproc) --force-sync --no-clone-bundle --no-tags; then
