@@ -216,6 +216,23 @@ jobs:
           echo "正在打隐藏应用补丁"
           patch -p1 -F 3 < 69_hide_stuff.patch
 
+      # 修复 SukiSU 上游 bug：SUSFS 补丁会在 base.c 里使用 SUSFS_IS_INODE_OPEN_REDIRECT /
+      # SUSFS_IS_INODE_SUS_MAP 宏，但忘了 include <linux/susfs_def.h>，导致编译报
+      # "call to undeclared function" 错误。所有受影响的 OnePlus 机型都需要这个修复。
+      - name: Apply local fix patches
+        run: |
+          PATCH_DIR="${{ github.workspace }}/patches"
+          if [ ! -d "$PATCH_DIR" ]; then
+            echo "无本地修复补丁目录，跳过"
+            exit 0
+          fi
+          cd kernel_workspace/kernel_platform
+          for p in "$PATCH_DIR"/*.patch; do
+            [ -f "$p" ] || continue
+            echo ">>> 应用本地修复补丁：$(basename $p)"
+            patch -p1 -F 3 < "$p"
+          done
+
       - name: Apply LZ4KD
         run: |
           cd kernel_workspace/kernel_platform/common
