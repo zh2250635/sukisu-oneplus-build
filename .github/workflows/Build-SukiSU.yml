@@ -161,12 +161,21 @@ jobs:
 
       - name: Install dependencies
         run: |
-          # WSL 上已装好绝大部分依赖，缺啥补啥；用 DEBIAN_FRONTEND 跳过交互
-          sudo DEBIAN_FRONTEND=noninteractive apt-get update -qq
-          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
+          # WSL 上已装好绝大部分依赖，缺啥补啥；用 DEBIAN_FRONTEND 跳过交互。
+          # WSL 后台可能有 apt.systemd.daily 占着 apt 锁，用 flock 等到拿到锁再跑，
+          # 避免 "Could not get lock /var/lib/apt/lists/lock" 错误。
+          # 最长等 5 分钟，超时直接放弃（这一步本来就只是补缺，不是非装不可）。
+          run_apt() {
+            sudo DEBIAN_FRONTEND=noninteractive flock --wait 300 /var/lib/apt/lists/lock \
+              flock --wait 300 /var/lib/dpkg/lock-frontend "$@"
+          }
+          run_apt apt-get update -qq || echo "apt-get update 失败/超时，继续"
+          run_apt apt-get install -y -qq \
             python3 git curl wget jq bc bison flex zip unzip rsync xz-utils \
             build-essential libssl-dev libelf-dev cpio kmod ca-certificates \
-            libncurses-dev dos2unix
+            libncurses-dev dos2unix || {
+            echo "::warning::apt-get install 失败，假定依赖已就绪继续"
+          }
 
       - name: Show selected inputs debug
         run: |
