@@ -417,6 +417,15 @@ jobs:
         run: |
          cd kernel_workspace
          LTO=thin SYSTEM_DLKM_RE_SIGN=0 BUILD_SYSTEM_DLKM=0 KMI_SYMBOL_LIST_STRICT_MODE=0 ./kernel_platform/oplus/build/oplus_build_kernel.sh ${{ github.event.inputs.CPUD }} ${{ github.event.inputs.BUILD_METHOD }}
+         # oplus_build_kernel.sh 即使 bazel 失败也会返回 0，靠产物存在性来识别真假成功
+         if ! find kernel_platform -name "Image" -size +1M 2>/dev/null | grep -q "."; then
+           echo "::error::内核编译失败：未找到 >1M 的 Image 文件"
+           echo "==== 最近一次 build log 末尾 80 行 ===="
+           LATEST_LOG=$(ls -t kernel_platform/LOGDIR/*.log 2>/dev/null | head -1)
+           [ -n "$LATEST_LOG" ] && tail -80 "$LATEST_LOG"
+           exit 1
+         fi
+         echo "::notice::内核编译成功：$(find kernel_platform -name "Image" -size +1M 2>/dev/null | head -1)"
 
       - name: Make AnyKernel3
         run: |

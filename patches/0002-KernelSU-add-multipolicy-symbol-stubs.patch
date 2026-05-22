@@ -1,0 +1,54 @@
+From: KernelPatch CI <ci@example.com>
+Subject: [PATCH] KernelSU: add stubs for multi-policy SELinux symbols
+
+OnePlus 6.6 kernel 在 selinuxfs.c 里调用了 _with_policy 系列 multi-policy
+SELinux API，但 SukiSU-Ultra 没提供这些符号实现，链接报：
+
+  ld.lld: error: undefined symbol: security_sid_to_context_with_policy
+  ld.lld: error: undefined symbol: security_compute_av_user_with_policy
+  ld.lld: error: undefined symbol: security_context_to_sid_with_policy
+
+在 KernelSU/kernel/selinux/selinux.c 末尾追加 stub，全部直接返回 -EINVAL，
+让链接通过。运行时这些 API 不会被走到（multi-policy 逻辑在
+backup_sepolicy 为 NULL 时被跳过）。
+---
+diff -u a/KernelSU/kernel/selinux/selinux.c b/KernelSU/kernel/selinux/selinux.c
+--- a/KernelSU/kernel/selinux/selinux.c
++++ b/KernelSU/kernel/selinux/selinux.c
+@@ -338,4 +338,34 @@
+ 
+ DEFINE_STATIC_KEY_FALSE(ksu_init_rc_hook_key_false);
+ DEFINE_STATIC_KEY_FALSE(ksu_input_hook_key_false);
+-#endif
+\ No newline at end of file
++#endif
++/* ===== multi-policy SELinux 符号 stub（OnePlus selinuxfs.c 链接需要） ===== */
++#include <linux/types.h>
++#include <linux/export.h>
++
++void *backup_sepolicy = NULL;
++EXPORT_SYMBOL_GPL(backup_sepolicy);
++
++int security_sid_to_context_with_policy(void *policy, u32 sid, char **scontext, u32 *scontext_len)
++{
++    return -EINVAL;
++}
++EXPORT_SYMBOL_GPL(security_sid_to_context_with_policy);
++
++int security_context_to_sid_with_policy(void *policy, const char *scontext, u32 scontext_len, u32 *sid, gfp_t gfp)
++{
++    return -EINVAL;
++}
++EXPORT_SYMBOL_GPL(security_context_to_sid_with_policy);
++
++int security_compute_av_user_with_policy(void *policy, u32 ssid, u32 tsid, u32 tclass, void *avd)
++{
++    return -EINVAL;
++}
++EXPORT_SYMBOL_GPL(security_compute_av_user_with_policy);
++
++int security_compute_sid_with_policy(void *policy, u32 ssid, u32 tsid, u32 tclass, u32 specified, u32 *out_sid)
++{
++    return -EINVAL;
++}
++EXPORT_SYMBOL_GPL(security_compute_sid_with_policy);
