@@ -117,6 +117,43 @@ jobs:
 
     steps:
       # WSL 已挂 1 TB 磁盘且剩余 744 GB，无需 GitHub-hosted 的 maximize-build-space
+
+      # self-hosted runner 不会自动清理工作区，先清掉上次残留的脏目录
+      # （AnyKernel3 / 编译产物 / 上次失败的 zip 等）。kernel_workspace 是 symlink
+      # 到 ~/kernel-cache/<key>，rm 这个 symlink 不影响真实缓存。
+      - name: Clean workspace from previous runs
+        run: |
+          set -x
+          rm -rf "$GITHUB_WORKSPACE"/AnyKernel3
+          rm -f  "$GITHUB_WORKSPACE"/*.zip
+          rm -rf "$GITHUB_WORKSPACE"/susfs4ksu "$GITHUB_WORKSPACE"/SukiSU_patch || true
+
+          # kernel_workspace 处理：
+          #   - 是 symlink → 直接删（保留 ~/kernel-cache/<key> 真实数据）
+          #   - 是旧的实体目录（来自加缓存逻辑前的旧 run）→ 把内容搬迁到对应缓存目录后清掉
+          KW="$GITHUB_WORKSPACE/kernel_workspace"
+          CACHE_KEY="${{ github.event.inputs.FEIL }}-${{ github.event.inputs.ANDROID_VERSION }}-${{ github.event.inputs.KERNEL_VERSION }}-${{ github.event.inputs.CPU }}"
+          CACHE_DIR="$HOME/kernel-cache/$CACHE_KEY"
+          if [ -L "$KW" ]; then
+            echo ">>> kernel_workspace 是 symlink，删除 symlink 保留缓存"
+            rm -f "$KW"
+          elif [ -d "$KW" ]; then
+            if [ -d "$CACHE_DIR/.repo" ]; then
+              echo ">>> 实体目录 + 已有缓存：直接丢弃实体目录（缓存优先）"
+              rm -rf "$KW"
+            else
+              echo ">>> 实体目录 + 缓存为空：将实体目录迁移为新缓存"
+              mkdir -p "$(dirname "$CACHE_DIR")"
+              mv "$KW" "$CACHE_DIR"
+            fi
+          fi
+          ls -la "$GITHUB_WORKSPACE/"
+
+      # 必须显式 checkout，原作者的 workflow 没这一步是因为 GitHub-hosted runner 默认会拉，
+      # 但 self-hosted runner 不会自动 checkout，导致 patches/ 等本仓库文件取不到。
+      - name: Checkout repo (for patches/ and any local files)
+        uses: actions/checkout@v4
+
       - name: Configure Git
         run: |
           git config --global user.name "Numbersf"
@@ -365,6 +402,8 @@ jobs:
 
       - name: Make AnyKernel3
         run: |
+          # 上一步 Clean workspace 已删过 AnyKernel3 兜底；这里再加 -rf 保证幂等
+          rm -rf ./AnyKernel3
           git clone https://github.com/Numbersf/AnyKernel3 --depth=1
           rm -rf ./AnyKernel3/.git
 
