@@ -202,9 +202,15 @@ jobs:
           if [ -d .repo ]; then
             echo "===== 命中缓存：$CACHE_DIR ====="
             echo ">>> 复位所有 repo 仓库到上游 HEAD（清掉上次打的 patch / commit / 临时文件）"
+            # 自愈步骤 1：被中断的 sync 可能让 git index 损坏，先重建
+            repo forall -c 'sh -c "git status >/dev/null 2>&1 || (echo \"修复损坏的 index: $REPO_PATH\"; rm -f .git/index; git read-tree HEAD 2>/dev/null || true)"' || true
+            # 自愈步骤 2：reset + clean
             repo forall -c 'git reset --hard HEAD 2>/dev/null; git clean -fdx 2>/dev/null' || true
             echo ">>> 增量 repo sync"
-            repo sync -c -j$(nproc) --force-sync --no-clone-bundle --no-tags
+            if ! repo sync -c -j$(nproc) --force-sync --no-clone-bundle --no-tags; then
+              echo ">>> 增量 sync 失败，尝试 -j1 详细模式"
+              repo sync -c -j1 --force-sync --fail-fast --no-clone-bundle --no-tags
+            fi
           else
             echo "===== 未命中缓存：首次初始化 ====="
             repo init -u https://github.com/OnePlusOSS/kernel_manifest.git -b refs/heads/oneplus/${{ github.event.inputs.CPU }} -m ${{ github.event.inputs.FEIL }}.xml --depth=1
