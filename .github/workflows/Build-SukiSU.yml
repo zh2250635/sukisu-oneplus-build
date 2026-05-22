@@ -152,17 +152,42 @@ jobs:
 
       - name: Initialize repo and sync
         run: |
-          mkdir kernel_workspace && cd kernel_workspace
-          repo init -u https://github.com/OnePlusOSS/kernel_manifest.git -b refs/heads/oneplus/${{ github.event.inputs.CPU }} -m ${{ github.event.inputs.FEIL }}.xml --depth=1
-          repo sync
-          if [  -e kernel_platform/common/BUILD.bazel ]; then
-          sed -i '/^[[:space:]]*"protected_exports_list"[[:space:]]*:[[:space:]]*"android\/abi_gki_protected_exports_aarch64",$/d' kernel_platform/common/BUILD.bazel
+          # ====== 持久化缓存机制（self-hosted runner 专用） ======
+          # 将 kernel_workspace 做成指向持久缓存目录的 symlink，按机型独立缓存。
+          # 第一次：~/kernel-cache/<key>/ 为空，repo init+sync 全量拉（30-60 分钟）。
+          # 后续：reset/clean 清干净 → repo sync 增量拉（1-2 分钟）。
+          CACHE_KEY="${{ github.event.inputs.FEIL }}-${{ github.event.inputs.ANDROID_VERSION }}-${{ github.event.inputs.KERNEL_VERSION }}-${{ github.event.inputs.CPU }}"
+          CACHE_DIR="$HOME/kernel-cache/$CACHE_KEY"
+          mkdir -p "$CACHE_DIR"
+          ln -snf "$CACHE_DIR" kernel_workspace
+
+          cd kernel_workspace
+          if [ -d .repo ]; then
+            echo "===== 命中缓存：$CACHE_DIR ====="
+            echo ">>> 复位所有 repo 仓库到上游 HEAD（清掉上次打的 patch / commit / 临时文件）"
+            repo forall -c 'git reset --hard HEAD 2>/dev/null; git clean -fdx 2>/dev/null' || true
+            echo ">>> 增量 repo sync"
+            repo sync -c -j$(nproc) --force-sync --no-clone-bundle --no-tags
+          else
+            echo "===== 未命中缓存：首次初始化 ====="
+            repo init -u https://github.com/OnePlusOSS/kernel_manifest.git -b refs/heads/oneplus/${{ github.event.inputs.CPU }} -m ${{ github.event.inputs.FEIL }}.xml --depth=1
+            repo sync -c -j$(nproc) --no-clone-bundle --no-tags
           fi
-          if [  -e kernel_platform/msm-kernel/BUILD.bazel ]; then
-          sed -i '/^[[:space:]]*"protected_exports_list"[[:space:]]*:[[:space:]]*"android\/abi_gki_protected_exports_aarch64",$/d' kernel_platform/msm-kernel/BUILD.bazel
+
+          # ====== 原 workflow 的清理动作，每次都要做（patch 不会改这些文件） ======
+          if [ -e kernel_platform/common/BUILD.bazel ]; then
+            sed -i '/^[[:space:]]*"protected_exports_list"[[:space:]]*:[[:space:]]*"android\/abi_gki_protected_exports_aarch64",$/d' kernel_platform/common/BUILD.bazel
           fi
-          rm kernel_platform/common/android/abi_gki_protected_exports_* || echo "No protected exports!"
-          rm kernel_platform/msm-kernel/android/abi_gki_protected_exports_* || echo "No protected exports!"
+          if [ -e kernel_platform/msm-kernel/BUILD.bazel ]; then
+            sed -i '/^[[:space:]]*"protected_exports_list"[[:space:]]*:[[:space:]]*"android\/abi_gki_protected_exports_aarch64",$/d' kernel_platform/msm-kernel/BUILD.bazel
+          fi
+          rm -f kernel_platform/common/android/abi_gki_protected_exports_* || echo "No protected exports!"
+          rm -f kernel_platform/msm-kernel/android/abi_gki_protected_exports_* || echo "No protected exports!"
+
+          # ====== 清理上次残留的辅助仓库 / 编译中间产物（保留 .repo 主仓库缓存） ======
+          rm -rf susfs4ksu SukiSU_patch
+          rm -rf kernel_platform/KernelSU
+          rm -rf kernel_platform/out kernel_platform/bazel-* AnyKernel3 *.zip || true
 
       # 删除 -dirty 后缀
       - name: Force remove -dirty suffix
