@@ -1,0 +1,6 @@
+# 调试 / 参考用产物
+.prebuilt_ref/
+
+# 本地下载的成品 AK3 包
+AK3_*.zip
+AnyKernel3_*.zip

@@ -328,23 +328,6 @@ jobs:
           echo "正在打隐藏应用补丁"
           patch -p1 -F 3 < 69_hide_stuff.patch
 
-      # 修复 SukiSU 上游 bug：SUSFS 补丁会在 base.c 里使用 SUSFS_IS_INODE_OPEN_REDIRECT /
-      # SUSFS_IS_INODE_SUS_MAP 宏，但忘了 include <linux/susfs_def.h>，导致编译报
-      # "call to undeclared function" 错误。所有受影响的 OnePlus 机型都需要这个修复。
-      - name: Apply local fix patches
-        run: |
-          PATCH_DIR="${{ github.workspace }}/patches"
-          if [ ! -d "$PATCH_DIR" ]; then
-            echo "无本地修复补丁目录，跳过"
-            exit 0
-          fi
-          cd kernel_workspace/kernel_platform
-          for p in "$PATCH_DIR"/*.patch; do
-            [ -f "$p" ] || continue
-            echo ">>> 应用本地修复补丁：$(basename $p)"
-            patch -p1 -F 3 < "$p"
-          done
-
       - name: Apply LZ4KD
         run: |
           cd kernel_workspace/kernel_platform/common
@@ -438,40 +421,110 @@ jobs:
             fi
           fi
 
+      # 编译入口（FAST 路径，模仿 Numbersf/Action-Build SukiSU-Ultra workflow）
+      # 直接 standalone GKI build：make O=out gki_defconfig olddefconfig all
+      # 优点：
+      #   1. 完全绕开 build_with_bazel.py，避免 OnePlus oplus_modules_variant.bzl
+      #      `bazel_support_target=["sun","parrot"]` 引发的 ddk_config 重复定义问题
+      #      （这也是之前 0003-oplus-bzl-only-build-sun-target.patch 修的事，
+      #      改走 FAST 路径后就不再需要那个 patch）
+      #   2. 不依赖 oplus_build_kernel.sh / build_with_bazel.py 的 OEM 包装
+      #   3. release 40069 用的就是这条路径（FAST_BUILD=true），跟参考实现对齐
+      # 关键路径：
+      #   - clang prebuilt 来自 manifest 里 sync 下来的 prebuilts/clang/host/linux-x86/
+      #     目录中的 clang-r{VERSION}/bin（VERSION 由 build.config.constants 给出）
+      #   - PAHOLE 来自 prebuilts/kernel-build-tools/linux-x86/bin/pahole
+      #   - KCFLAGS 加 -fdebug/file/macro-prefix-map 把绝对路径压缩成 . 便于 ccache 命中
       - name: Build kernel
-        # sm8750 / sm8650 / sm7675 这代设备需要 16K page size 内核（vendor_dlkm 模块按 16K 编），
-        # 必须走 build_with_bazel.py 路径；oplus_build_kernel.sh 出的是 4K kernel，会启动失败
-        if: ${{ github.event.inputs.CPU == 'sm8650' || github.event.inputs.CPU == 'sm7675' || github.event.inputs.CPU == 'sm8750' || github.event.inputs.CPU == 'sm8850' }}
         run: |
-          cd kernel_workspace
-          # sm8750/sm8850 这代设备 bazel target 只有 sun_perf / sun_consolidate（没有 sun_gki），
-          # 不管用户 input 选 gki 还是 perf 都强制走 perf，避免 "failed to find any Bazel targets"。
-          BAZEL_VARIANT=perf
-          if [ "${{ github.event.inputs.BUILD_METHOD }}" = "consolidate" ]; then
-            BAZEL_VARIANT=consolidate
+          set -euo pipefail
+          cd kernel_workspace/kernel_platform
+
+          # ---- 自动探测 prebuilts 目录名（部分仓库叫 prebuilts，部分带后缀） ----
+          CLANG_PARENT=$(find . -maxdepth 1 -type d -name 'prebuilts*' -exec test -d '{}/clang/host/linux-x86' \; -print | head -1)
+          KBT_PARENT=$(find . -maxdepth 1 -type d -name 'prebuilts*' -exec test -d '{}/kernel-build-tools' \; -print | head -1)
+          if [ -z "$CLANG_PARENT" ]; then
+            echo "::error::找不到 prebuilts*/clang/host/linux-x86"
+            exit 13
           fi
-          # -g/--gki-headers：用 common 的 header 替代 msm-kernel 的 header。
-          # OnePlus sm8750 的 msm-kernel/include/crypto/hash.h 是不带 multibuffer hash
-          # (HASH_MAX_MB_MSGS / mb_max_msgs / finup_mb / crypto_shash_finup_mb) 的旧版
-          # stub，但 msm-kernel/crypto/shash.c、drivers/md/dm-verity-target.c、
-          # fs/verity/verify.c 都引用了这些新符号，common header 里才有完整定义。
-          # 不加 -g 直接 build 会编译报 "use of undeclared identifier HASH_MAX_MB_MSGS" 等。
-          ./kernel_platform/build_with_bazel.py -g -t ${{ github.event.inputs.CPUD }} ${BAZEL_VARIANT}
-          
-      - name: Fallback build kernel
-        if: ${{ github.event.inputs.CPU != 'sm8650' && github.event.inputs.CPU != 'sm7675' && github.event.inputs.CPU != 'sm8750' && github.event.inputs.CPU != 'sm8850' }}
-        run: |
-         cd kernel_workspace
-         LTO=thin SYSTEM_DLKM_RE_SIGN=0 BUILD_SYSTEM_DLKM=0 KMI_SYMBOL_LIST_STRICT_MODE=0 ./kernel_platform/oplus/build/oplus_build_kernel.sh ${{ github.event.inputs.CPUD }} ${{ github.event.inputs.BUILD_METHOD }}
-         # oplus_build_kernel.sh 即使 bazel 失败也会返回 0，靠产物存在性来识别真假成功
-         if ! find kernel_platform -name "Image" -size +1M 2>/dev/null | grep -q "."; then
-           echo "::error::内核编译失败：未找到 >1M 的 Image 文件"
-           echo "==== 最近一次 build log 末尾 80 行 ===="
-           LATEST_LOG=$(ls -t kernel_platform/LOGDIR/*.log 2>/dev/null | head -1)
-           [ -n "$LATEST_LOG" ] && tail -80 "$LATEST_LOG"
-           exit 1
-         fi
-         echo "::notice::内核编译成功：$(find kernel_platform -name "Image" -size +1M 2>/dev/null | head -1)"
+          CLANG_PARENT="${CLANG_PARENT#./}"
+          KBT_PARENT="${KBT_PARENT#./}"
+          echo "✅ CLANG_PARENT=$CLANG_PARENT"
+          echo "✅ KBT_PARENT=$KBT_PARENT"
+
+          # ---- 提取 CLANG_VERSION（优先 build.config.common，回退 build.config.constants） ----
+          CLANG_VERSION=""
+          for f in ./common/build.config.common ./common/build.config.constants; do
+            [ -f "$f" ] || continue
+            v=$(grep -E '^(CLANG_VERSION|CLANG_PREBUILT_BIN)=' "$f" | head -1 || true)
+            # 形如 CLANG_VERSION=r510928 或 CLANG_PREBUILT_BIN=...clang-r510928/bin
+            if [[ "$v" =~ clang-(r[0-9a-z]+) ]]; then
+              CLANG_VERSION="${BASH_REMATCH[1]}"
+              break
+            fi
+            if [[ "$v" =~ ^CLANG_VERSION=(r[0-9a-z]+) ]]; then
+              CLANG_VERSION="${BASH_REMATCH[1]}"
+              break
+            fi
+          done
+          if [ -z "$CLANG_VERSION" ]; then
+            # 兜底：列目录看有几个 clang-r*，挑第一个
+            CLANG_VERSION=$(ls -1 "$CLANG_PARENT/clang/host/linux-x86" 2>/dev/null | grep -E '^clang-r[0-9a-z]+$' | head -1 | sed 's/^clang-//')
+          fi
+          if [ -z "$CLANG_VERSION" ]; then
+            echo "::error::无法识别 CLANG_VERSION"
+            exit 13
+          fi
+          echo "✅ CLANG_VERSION=$CLANG_VERSION"
+
+          CLANG_BIN="$GITHUB_WORKSPACE/kernel_workspace/kernel_platform/$CLANG_PARENT/clang/host/linux-x86/clang-$CLANG_VERSION/bin"
+          PAHOLE_BIN="$GITHUB_WORKSPACE/kernel_workspace/kernel_platform/$KBT_PARENT/kernel-build-tools/linux-x86/bin/pahole"
+
+          if [ ! -x "$CLANG_BIN/clang" ]; then
+            echo "::error::clang 不存在: $CLANG_BIN/clang"
+            exit 13
+          fi
+          if [ ! -x "$PAHOLE_BIN" ]; then
+            # PAHOLE 不强制要求在 prebuilt，可以从系统 PATH 兜底
+            PAHOLE_BIN=$(command -v pahole || true)
+            [ -z "$PAHOLE_BIN" ] && { echo "::error::pahole 缺失"; exit 13; }
+            echo "⚠️ pahole 走系统 PATH: $PAHOLE_BIN"
+          fi
+
+          export PATH="$CLANG_BIN:/usr/lib/ccache:$PATH"
+          echo "✅ PATH head: $CLANG_BIN"
+          clang --version | head -1
+
+          # ---- 路径重映射：让产物里不带 GitHub runner 绝对路径，提高 ccache 命中 ----
+          cd ./common
+          COMMON_REAL=$(pwd -P)
+          PLATFORM_REAL=$(dirname "$COMMON_REAL")
+          ROOT_REAL=$(dirname "$PLATFORM_REAL")
+          KCFLAGS="-fdebug-prefix-map=$ROOT_REAL=. -fmacro-prefix-map=$ROOT_REAL=. -ffile-prefix-map=$ROOT_REAL=. -no-canonical-prefixes -Wno-error -D__ANDROID_COMMON_KERNEL__"
+
+          MAKE_ARGS=(
+            LLVM=1
+            ARCH=arm64
+            CROSS_COMPILE=aarch64-linux-gnu-
+            CC="ccache clang"
+            HOSTCC="ccache clang"
+            HOSTLD=ld.lld
+            LD=ld.lld
+            PAHOLE="$PAHOLE_BIN"
+            KCFLAGS="$KCFLAGS"
+          )
+
+          make O=out "${MAKE_ARGS[@]}" gki_defconfig --no-print-directory
+          make O=out "${MAKE_ARGS[@]}" olddefconfig --no-print-directory
+          make -j"$(nproc --all)" O=out "${MAKE_ARGS[@]}"
+
+          # 产物存在性兜底校验
+          IMG="$COMMON_REAL/out/arch/arm64/boot/Image"
+          if [ ! -s "$IMG" ]; then
+            echo "::error::内核编译失败：未生成 $IMG"
+            exit 1
+          fi
+          echo "::notice::内核编译成功：$IMG ($(stat -c%s "$IMG") bytes)"
 
       - name: Make AnyKernel3
         run: |
@@ -489,63 +542,22 @@ jobs:
           echo "AnyKernel3 HEAD: $(cd AnyKernel3 && git rev-parse --short HEAD)"
           rm -rf ./AnyKernel3/.git
 
-          dir1="kernel_workspace/kernel_platform/out/msm-kernel-${{ github.event.inputs.CPUD }}-${{ github.event.inputs.BUILD_METHOD }}/dist/"
-          dir2="kernel_workspace/kernel_platform/bazel-out/k8-fastbuild/bin/msm-kernel/${{ github.event.inputs.CPUD }}_gki_kbuild_mixed_tree/"
-          dir3="kernel_workspace/kernel_platform/out/msm-${{ github.event.inputs.CPUD }}-${{ github.event.inputs.CPUD }}-${{ github.event.inputs.BUILD_METHOD }}/dist/"
-          dir4="kernel_workspace/kernel_platform/out/msm-kernel-${{ github.event.inputs.CPUD }}-${{ github.event.inputs.BUILD_METHOD }}/gki_kernel/common/arch/arm64/boot/"
-          dir5="kernel_workspace/kernel_platform/out/msm-${{ github.event.inputs.CPUD }}-${{ github.event.inputs.CPUD }}-${{ github.event.inputs.BUILD_METHOD }}/gki_kernel/common/arch/arm64/boot/"
-          # OnePlus oplus_build_kernel.sh sun gki 实际跑的是 sun_perf 目标，产物落在 -perf/dist
-          dir6="kernel_workspace/kernel_platform/out/msm-kernel-${{ github.event.inputs.CPUD }}-perf/dist/"
-          target1="./AnyKernel3/"
-          target2="./kernel_workspace/kernel"
-
-          # 查找 Image 文件
-          if find "$dir1" -name "Image" | grep -q "Image"; then
-            image_path="$dir1"Image
-          elif find "$dir2" -name "Image" | grep -q "Image"; then
-            image_path="$dir2"Image
-          elif find "$dir3" -name "Image" | grep -q "Image"; then
-            image_path="$dir3"Image
-          elif find "$dir4" -name "Image" | grep -q "Image"; then
-            image_path="$dir4"Image
-          elif find "$dir5" -name "Image" | grep -q "Image"; then
-            image_path="$dir5"Image
-          elif find "$dir6" -name "Image" 2>/dev/null | grep -q "Image"; then
-            # 命中 -perf/dist：把 dir1 重定向到这里，后面 dtbo 等附加文件也能找到
-            image_path="$dir6"Image
-            dir1="$dir6"
+          # FAST 路径下 Image 只会落在 common/out/arch/arm64/boot/Image。
+          # 兜底用 find 在 common/out 下递归找一下，防止 OnePlus 版本 manifest
+          # 把输出落到子目录的情况。
+          IMG_FAST="kernel_workspace/kernel_platform/common/out/arch/arm64/boot/Image"
+          if [ -f "$IMG_FAST" ]; then
+            image_path="$IMG_FAST"
           else
-            image_path=$(find "./kernel_workspace/kernel_platform/common/out/" -name "Image" | head -n 1)
+            image_path=$(find "./kernel_workspace/kernel_platform/common/out/" -name "Image" -type f 2>/dev/null | head -n 1)
           fi
 
-          # 拷贝 Image
           if [ -n "$image_path" ] && [ -f "$image_path" ]; then
-            mkdir -p "$dir1"
-            if [ "$(realpath "$image_path")" != "$(realpath "$dir1"Image)" ]; then
-              cp "$image_path" "$dir1"
-            else
-              echo "源文件与目标相同，跳过复制"
-            fi
-            cp "$dir1"Image ./AnyKernel3/Image
+            cp "$image_path" ./AnyKernel3/Image
+            echo "✅ 已复制 Image -> AnyKernel3/Image (来自: $image_path)"
           else
-            echo "未找到 Image 文件，构建可能失败"
+            echo "::error::未找到 Image 文件，构建失败"
             exit 1
-          fi
-
-          # 可选复制其它新文件（如果存在）
-          if [ "${{ github.event.inputs.CPU }}" = "sm8750" ] || [ "${{ github.event.inputs.CPU }}" = "sm8850" ]; then
-          for file in dtbo.img system_dlkm.erofs.img vendor_dlkm.img vendor_boot.img; do
-            if [ -f "$dir1$file" ]; then
-              target_name="$file"
-              # 特殊处理 system_dlkm.erofs.img 的目标名
-              if [ "$file" = "system_dlkm.erofs.img" ]; then
-                target_name="system_dlkm.img"
-              fi
-              cp "$dir1$file" "./AnyKernel3/$target_name"
-            else
-              echo "$file 不存在，跳过复制"
-            fi
-          done
           fi
 
       - name: Apply patch_linux and replace Image
