@@ -1,0 +1,9 @@
+{
+  "model": "oneplus_12",
+  "cpu": "sm8650",
+  "cpud": "pineapple",
+  "android_version": "android14",
+  "kernel_version": "6.1",
+  "feil": "oneplus_12_v",
+  "os_version": "OOS14"
+}

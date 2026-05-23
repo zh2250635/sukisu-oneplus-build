@@ -1,0 +1,9 @@
+{
+  "model": "oneplus_ace2_pro",
+  "cpu": "sm8550",
+  "cpud": "kalama",
+  "android_version": "android13",
+  "kernel_version": "5.15",
+  "feil": "oneplus_ace2_pro_v",
+  "os_version": "OOS13"
+}

@@ -1,0 +1,9 @@
+{
+  "model": "oneplus_ace5",
+  "cpu": "sm8650",
+  "cpud": "pineapple",
+  "android_version": "android14",
+  "kernel_version": "6.1",
+  "feil": "oneplus_ace5",
+  "os_version": "OOS14"
+}

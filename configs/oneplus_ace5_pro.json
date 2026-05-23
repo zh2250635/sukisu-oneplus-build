@@ -1,0 +1,9 @@
+{
+  "model": "oneplus_ace5_pro",
+  "cpu": "sm8750",
+  "cpud": "sun",
+  "android_version": "android15",
+  "kernel_version": "6.6",
+  "feil": "oneplus_ace5_pro",
+  "os_version": "OOS15"
+}
