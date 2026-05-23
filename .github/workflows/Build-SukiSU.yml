@@ -357,14 +357,22 @@ jobs:
           echo "CONFIG_KPM=y" >> "$CONFIG_FILE"
 
           # SUSFS config
+          # 这一段对齐 release 40069 参考 Image 的实际启用项（strings 反推）：
+          #   - 不启用 HAS_MAGIC_MOUNT（参考 Image 没有）
+          #   - 显式关 SUS_SU=n（默认 y，但会触发 fs/devpts/inode.c 调用
+          #     `ksu_handle_devpts`，而 SukiSU 678c00ca 只提供 `__ksu_handle_devpts`，
+          #     最终 link 报 undefined symbol: ksu_handle_devpts）
+          #   - 加 SUS_MAP=y（参考 Image 启用，新版 SukiSU 默认 y 但保险起见显式写）
           echo "CONFIG_KSU_SUSFS=y" >> "$CONFIG_FILE"
-          echo "CONFIG_KSU_SUSFS_HAS_MAGIC_MOUNT=y" >> "$CONFIG_FILE"
+          echo "CONFIG_KSU_SUSFS_HAS_MAGIC_MOUNT=n" >> "$CONFIG_FILE"
           echo "CONFIG_KSU_SUSFS_SUS_PATH=y" >> "$CONFIG_FILE"
           echo "CONFIG_KSU_SUSFS_SUS_MOUNT=y" >> "$CONFIG_FILE"
           echo "CONFIG_KSU_SUSFS_AUTO_ADD_SUS_KSU_DEFAULT_MOUNT=y" >> "$CONFIG_FILE"
           echo "CONFIG_KSU_SUSFS_AUTO_ADD_SUS_BIND_MOUNT=y" >> "$CONFIG_FILE"
           echo "CONFIG_KSU_SUSFS_SUS_KSTAT=y" >> "$CONFIG_FILE"
+          echo "CONFIG_KSU_SUSFS_SUS_MAP=y" >> "$CONFIG_FILE"
           echo "CONFIG_KSU_SUSFS_SUS_OVERLAYFS=n" >> "$CONFIG_FILE"
+          echo "CONFIG_KSU_SUSFS_SUS_SU=n" >> "$CONFIG_FILE"
           echo "CONFIG_KSU_SUSFS_TRY_UMOUNT=y" >> "$CONFIG_FILE"
           echo "CONFIG_KSU_SUSFS_AUTO_ADD_TRY_UMOUNT_FOR_BIND_MOUNT=y" >> "$CONFIG_FILE"
           echo "CONFIG_KSU_SUSFS_SPOOF_UNAME=y" >> "$CONFIG_FILE"
