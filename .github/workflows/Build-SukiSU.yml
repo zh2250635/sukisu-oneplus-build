@@ -118,34 +118,20 @@ jobs:
     steps:
       # WSL 已挂 1 TB 磁盘且剩余 744 GB，无需 GitHub-hosted 的 maximize-build-space
 
-      # self-hosted runner 不会自动清理工作区，先清掉上次残留的脏目录
-      # （AnyKernel3 / 编译产物 / 上次失败的 zip 等）。kernel_workspace 是 symlink
-      # 到 ~/kernel-cache/<key>，rm 这个 symlink 不影响真实缓存。
+      # self-hosted runner 不会自动清理工作区，每次开工先把旧产物清光，
+      # 不再做持久化缓存（symlink/stash 那套被证明比全新拉还慢）。
       - name: Clean workspace from previous runs
         run: |
           set -x
           rm -rf "$GITHUB_WORKSPACE"/AnyKernel3
           rm -f  "$GITHUB_WORKSPACE"/*.zip
           rm -rf "$GITHUB_WORKSPACE"/susfs4ksu "$GITHUB_WORKSPACE"/SukiSU_patch || true
-
-          # kernel_workspace 处理：
-          #   - 是 symlink → 直接删（保留 ~/kernel-cache/<key> 真实数据）
-          #   - 是旧的实体目录（来自加缓存逻辑前的旧 run）→ 把内容搬迁到对应缓存目录后清掉
+          # kernel_workspace 可能是上次的 symlink 也可能是实体目录，统统干掉
           KW="$GITHUB_WORKSPACE/kernel_workspace"
-          CACHE_KEY="${{ github.event.inputs.FEIL }}-${{ github.event.inputs.ANDROID_VERSION }}-${{ github.event.inputs.KERNEL_VERSION }}-${{ github.event.inputs.CPU }}"
-          CACHE_DIR="$HOME/kernel-cache/$CACHE_KEY"
           if [ -L "$KW" ]; then
-            echo ">>> kernel_workspace 是 symlink，删除 symlink 保留缓存"
             rm -f "$KW"
           elif [ -d "$KW" ]; then
-            if [ -d "$CACHE_DIR/.repo" ]; then
-              echo ">>> 实体目录 + 已有缓存：直接丢弃实体目录（缓存优先）"
-              rm -rf "$KW"
-            else
-              echo ">>> 实体目录 + 缓存为空：将实体目录迁移为新缓存"
-              mkdir -p "$(dirname "$CACHE_DIR")"
-              mv "$KW" "$CACHE_DIR"
-            fi
+            rm -rf "$KW"
           fi
           ls -la "$GITHUB_WORKSPACE/"
 
@@ -198,43 +184,13 @@ jobs:
 
       - name: Initialize repo and sync
         run: |
-          # ====== 持久化缓存机制（self-hosted runner 专用） ======
-          # 将 kernel_workspace 做成指向持久缓存目录的 symlink，按机型独立缓存。
-          # 第一次：~/kernel-cache/<key>/ 为空，repo init+sync 全量拉（30-60 分钟）。
-          # 后续：reset/clean 清干净 → repo sync 增量拉（1-2 分钟）。
-          CACHE_KEY="${{ github.event.inputs.FEIL }}-${{ github.event.inputs.ANDROID_VERSION }}-${{ github.event.inputs.KERNEL_VERSION }}-${{ github.event.inputs.CPU }}"
-          CACHE_DIR="$HOME/kernel-cache/$CACHE_KEY"
-          mkdir -p "$CACHE_DIR"
-          ln -snf "$CACHE_DIR" kernel_workspace
-
+          # 不做缓存。每次都全新 repo init + sync，简单可靠。
+          mkdir -p kernel_workspace
           cd kernel_workspace
-          if [ -d .repo ]; then
-            echo "===== 命中缓存：$CACHE_DIR ====="
-            # 不做 git reset/clean——这两个组合操作过于激进，曾误删根 project 的
-            # .git 元数据导致 "not a git repository: '.repo/projects/..git'"。
-            # 改用 stash：保留 .git 目录完整性，只把 working tree 改动暂存。
-            # 上次 patch 修改的文件、新增的辅助仓库和编译产物都会被 stash/删除。
-            echo ">>> 用 stash 暂存所有 project 的本地修改（保留 .git 完整性）"
-            repo forall -c 'git stash push --include-untracked --quiet --message "ci-cleanup-$(date +%s)" 2>/dev/null || true' || true
+          repo init -u https://github.com/OnePlusOSS/kernel_manifest.git -b refs/heads/oneplus/${{ github.event.inputs.CPU }} -m ${{ github.event.inputs.FEIL }}.xml --depth=1
+          repo sync -c -j$(nproc) --no-clone-bundle --no-tags
 
-            # repo 不跟踪的文件（patches 复制进来的、AnyKernel3 / KernelSU 等手动 clone）
-            # 不在任何 git 范围内，stash 不到，这里手动清
-            rm -rf susfs4ksu SukiSU_patch AnyKernel3 *.zip 2>/dev/null || true
-            rm -rf kernel_platform/KernelSU 2>/dev/null || true
-            # bazel-cache 故意保留——下次编译能直接复用 (~10 GB) 大幅加速
-
-            echo ">>> 增量 repo sync"
-            if ! repo sync -c -j$(nproc) --force-sync --no-clone-bundle --no-tags; then
-              echo ">>> 增量 sync 失败，尝试 -j1 详细模式定位问题 project"
-              repo sync -c -j1 --force-sync --fail-fast --no-clone-bundle --no-tags
-            fi
-          else
-            echo "===== 未命中缓存：首次初始化 ====="
-            repo init -u https://github.com/OnePlusOSS/kernel_manifest.git -b refs/heads/oneplus/${{ github.event.inputs.CPU }} -m ${{ github.event.inputs.FEIL }}.xml --depth=1
-            repo sync -c -j$(nproc) --no-clone-bundle --no-tags
-          fi
-
-          # ====== 原 workflow 的清理动作，每次都要做（patch 不会改这些文件） ======
+          # ====== 原 workflow 的清理动作 ======
           if [ -e kernel_platform/common/BUILD.bazel ]; then
             sed -i '/^[[:space:]]*"protected_exports_list"[[:space:]]*:[[:space:]]*"android\/abi_gki_protected_exports_aarch64",$/d' kernel_platform/common/BUILD.bazel
           fi
@@ -243,11 +199,6 @@ jobs:
           fi
           rm -f kernel_platform/common/android/abi_gki_protected_exports_* || echo "No protected exports!"
           rm -f kernel_platform/msm-kernel/android/abi_gki_protected_exports_* || echo "No protected exports!"
-
-          # ====== 清理上次残留的辅助仓库 / 编译中间产物（保留 .repo 主仓库缓存） ======
-          rm -rf susfs4ksu SukiSU_patch
-          rm -rf kernel_platform/KernelSU
-          rm -rf kernel_platform/out kernel_platform/bazel-* AnyKernel3 *.zip || true
 
       # 删除 -dirty 后缀
       - name: Force remove -dirty suffix
