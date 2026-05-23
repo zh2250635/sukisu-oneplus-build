@@ -466,14 +466,14 @@ jobs:
       - name: Apply patch_linux and replace Image
         if: ${{ github.event.inputs.KPM == 'true' }}
         run: |
-          cd /home/runner/work/Action_OnePlus_MKSU_SUSFS/Action_OnePlus_MKSU_SUSFS/kernel_workspace/kernel_platform/out/msm-kernel-${{ github.event.inputs.CPUD }}-${{ github.event.inputs.BUILD_METHOD }}/dist
-
+          # patch_linux 只需要 Image 这一个输入，输出 oImage。直接在 AnyKernel3/ 下跑，
+          # 跑完用 oImage 覆盖 Image，避免和 self-hosted runner 路径强绑定。
+          cd "$GITHUB_WORKSPACE/AnyKernel3"
           curl -LSs "https://raw.githubusercontent.com/ShirkNeko/SukiSU_patch/refs/heads/main/kpm/patch_linux" -o patch_linux
           chmod +x patch_linux
           ./patch_linux
           rm -f Image
           mv oImage Image
-          cp Image $GITHUB_WORKSPACE/AnyKernel3/Image
 
       # 下载 SUSFS 模块（CI）
       - name: Download Latest SUSFS Module from CI
