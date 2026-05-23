@@ -63,9 +63,24 @@ on:
         default: "builtin"
       SUSFS4KSU_COMMIT:
         type: string
-        description: "simonpunk/susfs4ksu commit"
+        description: "simonpunk/susfs4ksu commit (留空 = 用 SUSFS 分支 HEAD; 仅对 6.6 推荐锁 commit)"
         required: false
         default: "f450ec00bf592d080f59b01ff6f9242456c9a427"
+      SUSFS4KSU_COMMIT_ANDROID15_6_6:
+        type: string
+        description: "android15-6.6 专用 SUSFS commit (覆盖上面的)"
+        required: false
+        default: "f450ec00bf592d080f59b01ff6f9242456c9a427"
+      SUSFS4KSU_COMMIT_ANDROID14_6_1:
+        type: string
+        description: "android14-6.1 专用 SUSFS commit (留空 = 分支 HEAD)"
+        required: false
+        default: ""
+      SUSFS4KSU_COMMIT_ANDROID13_5_15:
+        type: string
+        description: "android13-5.15 专用 SUSFS commit (留空 = 分支 HEAD)"
+        required: false
+        default: ""
       SUKISU_PATCH_COMMIT:
         type: string
         description: "ShirkNeko/SukiSU_patch commit"
@@ -273,9 +288,23 @@ jobs:
           set -euo pipefail
           SUSFS_BRANCH="gki-${{ matrix.android_version }}-${{ matrix.kernel_version }}"
           git clone https://gitlab.com/simonpunk/susfs4ksu.git -b "$SUSFS_BRANCH"
-          (cd susfs4ksu && \
-           git fetch --depth=200 origin "$SUSFS_BRANCH" && \
-           git checkout "${{ github.event.inputs.SUSFS4KSU_COMMIT }}")
+
+          # 选择该 kernel_version 对应的 SUSFS commit pin
+          # 留空 = 用分支 HEAD (不 checkout)。每个 kernel_version 的 SUSFS 分支文件结构不同, 不能跨锁。
+          case "${{ matrix.android_version }}-${{ matrix.kernel_version }}" in
+            android15-6.6)   SUSFS_PIN="${{ github.event.inputs.SUSFS4KSU_COMMIT_ANDROID15_6_6 }}" ;;
+            android14-6.1)   SUSFS_PIN="${{ github.event.inputs.SUSFS4KSU_COMMIT_ANDROID14_6_1 }}" ;;
+            android13-5.15)  SUSFS_PIN="${{ github.event.inputs.SUSFS4KSU_COMMIT_ANDROID13_5_15 }}" ;;
+            *)               SUSFS_PIN="" ;;
+          esac
+          if [ -n "$SUSFS_PIN" ]; then
+            echo "lock SUSFS to $SUSFS_PIN"
+            (cd susfs4ksu && \
+             git fetch --depth=200 origin "$SUSFS_BRANCH" && \
+             git checkout "$SUSFS_PIN")
+          else
+            echo "use SUSFS branch HEAD: $SUSFS_BRANCH ($(cd susfs4ksu && git rev-parse --short HEAD))"
+          fi
 
           git clone https://github.com/ShirkNeko/SukiSU_patch.git
           (cd SukiSU_patch && git checkout "${{ github.event.inputs.SUKISU_PATCH_COMMIT }}")
