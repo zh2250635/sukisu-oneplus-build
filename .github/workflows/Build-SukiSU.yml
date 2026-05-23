@@ -368,7 +368,13 @@ jobs:
         if: ${{ github.event.inputs.CPU == 'sm8650' || github.event.inputs.CPU == 'sm7675' || github.event.inputs.CPU == 'sm8750' || github.event.inputs.CPU == 'sm8850' }}
         run: |
           cd kernel_workspace
-          ./kernel_platform/build_with_bazel.py -t ${{ github.event.inputs.CPUD }} ${{ github.event.inputs.BUILD_METHOD }}
+          # sm8750/sm8850 这代设备 bazel target 只有 sun_perf / sun_consolidate（没有 sun_gki），
+          # 不管用户 input 选 gki 还是 perf 都强制走 perf，避免 "failed to find any Bazel targets"。
+          BAZEL_VARIANT=perf
+          if [ "${{ github.event.inputs.BUILD_METHOD }}" = "consolidate" ]; then
+            BAZEL_VARIANT=consolidate
+          fi
+          ./kernel_platform/build_with_bazel.py -t ${{ github.event.inputs.CPUD }} ${BAZEL_VARIANT}
           
       - name: Fallback build kernel
         if: ${{ github.event.inputs.CPU != 'sm8650' && github.event.inputs.CPU != 'sm7675' && github.event.inputs.CPU != 'sm8750' && github.event.inputs.CPU != 'sm8850' }}
