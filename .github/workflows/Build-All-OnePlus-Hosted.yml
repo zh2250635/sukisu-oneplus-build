@@ -485,20 +485,24 @@ jobs:
           retention-days: 14
 
       # ============ STEP 3: 写回 cache (key 含 CLANG_VERSION) ============
+      # 注意: cache/save action 内部要 git fetch --tags + git push, 必须在有 .git 的目录里跑。
+      #       我们 checkout 路径是 action-source/, 把 working_dir 显式指过去。
       - name: 💾 Save ccache cache
-        if: always() && job.status == 'success'
+        if: success()
         uses: ./action-source/.github/actions/cache/save
         with:
           cache_path: ${{ env.CCACHE_DIR }}
           cache_key: sukisu-v1-${{ matrix.model }}-${{ matrix.os_version }}-${{ matrix.android_version }}-${{ matrix.kernel_version }}-${{ env.CLANG_VERSION }}
           cache_bucket: ccache-cache
           github_token: ${{ secrets.GITHUB_TOKEN }}
+          working_dir: ${{ github.workspace }}/action-source
 
       - name: 💾 Save LTO cache
-        if: always() && job.status == 'success'
+        if: success()
         uses: ./action-source/.github/actions/cache/save
         with:
           cache_path: ${{ env.LDCACHE_DIR }}
           cache_key: sukisu-v1-LTO-${{ matrix.model }}-${{ matrix.os_version }}-${{ matrix.android_version }}-${{ matrix.kernel_version }}-${{ env.CLANG_VERSION }}
           cache_bucket: lto-cache
           github_token: ${{ secrets.GITHUB_TOKEN }}
+          working_dir: ${{ github.workspace }}/action-source
