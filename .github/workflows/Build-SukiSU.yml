@@ -345,6 +345,50 @@ jobs:
             echo '完成LZ4KD补丁'
           fi
 
+      # OGKI -> GKI 转换（OnePlus Ace5 Pro 等 sm8750/HMBIRD_OGKI 机型必须！）
+      # 不打这个 patch，内核会跑 OGKI 调度模式但 vendor userspace 期望 HMBIRD_GKI，
+      # 导致 init 拉起 vendor 服务时找不到 ko，反复 bootloop。
+      # patch 内容: 注入 drivers/hmbird_patch.c，在 early_initcall 阶段把
+      # /soc/oplus,hmbird/version_type/type 从 "HMBIRD_OGKI" 改写成 "HMBIRD_GKI"。
+      # 来自 Numbersf/Action-Build SukiSU-Ultra 分支 patches/hmbird_patch.patch。
+      - name: Apply Convert HMBIRD_OGKI to HMBIRD_GKI
+        if: ${{ github.event.inputs.KERNEL_VERSION == '6.6' || github.event.inputs.KERNEL_VERSION == '6.12' }}
+        run: |
+          set -euo pipefail
+          PATCH_FILE="$GITHUB_WORKSPACE/patches/hmbird_patch.patch"
+          if [ ! -f "$PATCH_FILE" ]; then
+            echo "::error::找不到 $PATCH_FILE，需要从仓库 patches/ 目录提供"
+            exit 1
+          fi
+          cd kernel_workspace/kernel_platform/common
+          # 如果源码本来就有 hmbird 目录（部分新机型已经走 GKI），就不用打
+          for p in ./kernel/sched/hmbird* ./vendor/oplus/kernel/cpu/sched_ext/hmbird*; do
+            [ -d "$p" ] && {
+              echo "源码中风驰代码已经存在，跳过 OGKI->GKI 转换"
+              exit 0
+            }
+          done
+          # drivers/Makefile 头部加 obj-y += hmbird_patch.o，让 hmbird_patch.c 编进 vmlinux
+          if ! grep -q '^obj-y += hmbird_patch.o' drivers/Makefile; then
+            sed -i '1iobj-y += hmbird_patch.o' drivers/Makefile
+          fi
+          echo "正在打 OGKI->GKI 转换补丁"
+          patch -p1 -F 3 < "$PATCH_FILE"
+          echo "OGKI->GKI 转换完成"
+
+      # OnePlus 内核基带保护（Baseband Guard / BBG）
+      # 参考 Image release 40069 中 strings 反推确认启用。
+      # 通过 vc-teahouse/Baseband-guard setup.sh 把 BBG LSM 注入内核源码，
+      # 然后改 security/Kconfig 的 LSM 默认列表把 baseband_guard 串接到 selinux 后面。
+      - name: Apply LSM_BBG
+        run: |
+          set -euo pipefail
+          cd kernel_workspace/kernel_platform/common
+          echo "正在启用内核级基带保护支持..."
+          curl -LSs https://raw.githubusercontent.com/vc-teahouse/Baseband-guard/main/setup.sh | bash
+          # 把 baseband_guard 串到 LSM=... 默认列表里 selinux 后面（仅当还没串的时候）
+          sed -i '/^config LSM$/,/^help$/{ /^[[:space:]]*default/ { /baseband_guard/! s/selinux/selinux,baseband_guard/ } }' ./security/Kconfig
+
       # 配置信息
       - name: Add Configuration Settings
         run: |
