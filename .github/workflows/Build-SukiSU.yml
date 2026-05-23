@@ -374,7 +374,13 @@ jobs:
           if [ "${{ github.event.inputs.BUILD_METHOD }}" = "consolidate" ]; then
             BAZEL_VARIANT=consolidate
           fi
-          ./kernel_platform/build_with_bazel.py -t ${{ github.event.inputs.CPUD }} ${BAZEL_VARIANT}
+          # -g/--gki-headers：用 common 的 header 替代 msm-kernel 的 header。
+          # OnePlus sm8750 的 msm-kernel/include/crypto/hash.h 是不带 multibuffer hash
+          # (HASH_MAX_MB_MSGS / mb_max_msgs / finup_mb / crypto_shash_finup_mb) 的旧版
+          # stub，但 msm-kernel/crypto/shash.c、drivers/md/dm-verity-target.c、
+          # fs/verity/verify.c 都引用了这些新符号，common header 里才有完整定义。
+          # 不加 -g 直接 build 会编译报 "use of undeclared identifier HASH_MAX_MB_MSGS" 等。
+          ./kernel_platform/build_with_bazel.py -g -t ${{ github.event.inputs.CPUD }} ${BAZEL_VARIANT}
           
       - name: Fallback build kernel
         if: ${{ github.event.inputs.CPU != 'sm8650' && github.event.inputs.CPU != 'sm7675' && github.event.inputs.CPU != 'sm8750' && github.event.inputs.CPU != 'sm8850' }}
