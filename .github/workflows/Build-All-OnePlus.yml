@@ -386,10 +386,10 @@ jobs:
           COMMON_REAL=$(pwd -P)
           KCFLAGS="-fdebug-prefix-map=$DEVICE_WORK=. -fmacro-prefix-map=$DEVICE_WORK=. -ffile-prefix-map=$DEVICE_WORK=. -no-canonical-prefixes -Wno-error -pipe -D__ANDROID_COMMON_KERNEL__"
 
-          # 针对 sm8750/sm8845/sm8850（Cortex-Oryon-1）开启 CPU 特化优化
-          case "${{ matrix.cpu }}" in
-            sm8750|sm8845|sm8850) KCFLAGS="-mcpu=oryon-1 $KCFLAGS" ;;
-          esac
+          # 注意: -mcpu=oryon-1 需要 clang 19+ (WildKernels 用 ZyCromer 自定义 clang)，
+          # OnePlus prebuilt 的 clang-r510928 不认这个 CPU 名，会直接报
+          # "unsupported argument 'oryon-1' to option '-mcpu='" 编不动。
+          # 想开就先把 c_compiler 切到自定义 clang，否则保持默认通用 ARMv9 即可。
 
           MAKE_ARGS=(
             LLVM=1
