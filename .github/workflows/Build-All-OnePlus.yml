@@ -218,14 +218,23 @@ jobs:
         run: |
           set -euo pipefail
           cd kernel_platform
-          # SukiSU 锁 commit 注入
-          curl -LSs "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/${{ github.event.inputs.SUKISU_COMMIT }}/kernel/setup.sh" | \
-            bash -s "${{ github.event.inputs.SUKISU_BRANCH }}"
+          # 关键点：setup.sh 的 $1 是 "commit-or-tag-or-branch"，git checkout $1。
+          # 我们要锁 commit，就直接把 COMMIT 传过去（而不是分支名）。
+          # 否则 setup.sh 会去 checkout builtin 分支 HEAD（飘移），
+          # 拉到 SukiSU 5/21 的 a1f0f754（新版 layout），与锁的 susfs4ksu
+          # f450ec00 接口不兼容，编不过 drivers/kernelsu/supercall/dispatch.c。
+          PIN="${{ github.event.inputs.SUKISU_COMMIT }}"
+          BRANCH="${{ github.event.inputs.SUKISU_BRANCH }}"
+          REF="${PIN:-$BRANCH}"
+          echo "checkout SukiSU: $REF"
+          curl -LSs "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh" | bash -s "$REF"
           cd ./KernelSU
-          KSU_VERSION=$(expr $(/usr/bin/git rev-list --count main 2>/dev/null || /usr/bin/git rev-list --count HEAD) "+" 10606)
-          export KSUVER=$KSU_VERSION
+          # KSU_VERSION 用 main 分支 commit 计数 + 10606，跟 release 40069 对齐
+          git fetch origin main --depth=200 || true
+          KSU_VERSION=$(expr "$(git rev-list --count origin/main 2>/dev/null || git rev-list --count HEAD)" "+" 10606)
           echo "KSUVER=$KSU_VERSION" >> "$GITHUB_ENV"
           sed -i "s/DKSU_VERSION=12800/DKSU_VERSION=${KSU_VERSION}/" kernel/Makefile
+          echo "最终 KSUVER=$KSU_VERSION (HEAD: $(git rev-parse --short HEAD))"
 
       - name: Apply Patches SukiSU Ultra (susfs + SukiSU_patch)
         working-directory: ${{ env.DEVICE_WORK }}/kernel_workspace
