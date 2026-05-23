@@ -110,6 +110,37 @@ on:
         required: true
         default: false
 
+      # ============== 组件版本锁定 ==============
+      # 默认值锚定到「最近一次确认能编译并启动 OK」的 commit。
+      # 上游有 breaking change（典型例子：SukiSU 5/21 #892 引入 multi-policy
+      # SELinux extern 导致 selinuxfs.c 链接失败）时，这里默认值不变即可继续编译。
+      # 等上游修了再统一上调。
+      SUKISU_COMMIT:
+        type: string
+        description: "SukiSU-Ultra commit (锁版本，留空=builtin HEAD)"
+        required: false
+        default: "678c00cad91b8c9e8a2d8d3ffe71d919812d2d10"
+      SUKISU_BRANCH:
+        type: string
+        description: "SukiSU-Ultra 分支名(setup.sh 用，决定 KSU_VERSION 计数基准)"
+        required: false
+        default: "builtin"
+      SUSFS4KSU_COMMIT:
+        type: string
+        description: "simonpunk/susfs4ksu commit (留空=对应分支 HEAD)"
+        required: false
+        default: "0269bced"
+      SUKISU_PATCH_COMMIT:
+        type: string
+        description: "ShirkNeko/SukiSU_patch commit (留空=main HEAD)"
+        required: false
+        default: "547ae94bf6648a73c5ed8d3a9e2be62dc31b7d12"
+      ANYKERNEL3_COMMIT:
+        type: string
+        description: "Numbersf/AnyKernel3 commit (留空=main HEAD)"
+        required: false
+        default: "40f5e86a"
+
 jobs:
   build:
     # 跑在挂在 WSL 上的 self-hosted runner（label wsl-32c, 32 vCPU），代理已通过 ~/actions-runner/.env 注入
@@ -212,21 +243,66 @@ jobs:
           git commit -m "Force remove -dirty suffix from kernel version"
 
       # 添加 SukiSU Ultra
+      # 锁版本策略：SukiSU 的 setup.sh 内部就是 git clone + git checkout $1，
+      # 所以直接把锁定 commit 传进去即可。这样既保留 setup.sh 的配置注入逻辑
+      # （Makefile / Kconfig / symlink），又确保实际编译的源码是固定 commit，
+      # 不受上游 builtin 分支后续改动影响。
+      #
+      # 上游有 breaking change 的典型例子：SukiSU 5/21 commit a1f0f754 (#892)
+      # 引入 multi-policy SELinux extern (backup_sepolicy /
+      # security_context_to_sid_with_policy 等)，导致 selinuxfs.c 链接 undefined
+      # symbol。通过锁到 5/21 之前的 commit 即可避开。
       - name: Add KernelSU-SukiSU Ultra
         run: |
+          set -euo pipefail
           cd kernel_workspace/kernel_platform
-          curl -LSs "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh" | bash -s builtin
+
+          PIN="${{ github.event.inputs.SUKISU_COMMIT }}"
+          BRANCH="${{ github.event.inputs.SUKISU_BRANCH }}"
+          BRANCH="${BRANCH:-builtin}"
+          # 优先 commit，留空则用分支名
+          REF="${PIN:-$BRANCH}"
+
+          echo "=== SukiSU Ultra 装入 ==="
+          echo "checkout 目标: $REF (PIN=${PIN:-空} BRANCH=$BRANCH)"
+
+          curl -LSs "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh" | bash -s "$REF"
+
           cd ./KernelSU
-          KSU_VERSION=$(expr $(/usr/bin/git rev-list --count main) "+" 10606)
-          echo "KSUVER=$KSU_VERSION" >> $GITHUB_ENV
-          export KSU_VERSION=$KSU_VERSION
+          # KSU_VERSION：用 main 分支 commit 计数 + 10606，跟 release 40069 对齐
+          # （锁了 commit 后 HEAD 已经在指定 commit，需要从 origin/main 取计数）
+          git fetch origin main --depth=200 || true
+          KSU_VERSION=$(expr "$(git rev-list --count origin/main 2>/dev/null || git rev-list --count HEAD)" "+" 10606)
+          echo "KSUVER=$KSU_VERSION" >> "$GITHUB_ENV"
+          export KSU_VERSION
           sed -i "s/DKSU_VERSION=12800/DKSU_VERSION=${KSU_VERSION}/" kernel/Makefile
+          echo "最终 KSUVER=$KSU_VERSION (HEAD: $(git rev-parse --short HEAD))"
 
       - name: Apply Patches SukiSU Ultra
         run: |
+          set -euo pipefail
           cd kernel_workspace
-          git clone https://gitlab.com/simonpunk/susfs4ksu.git -b gki-${{ github.event.inputs.ANDROID_VERSION }}-${{ github.event.inputs.KERNEL_VERSION }}
+
+          # ---- susfs4ksu (gitlab) ----
+          # 用 -b 拉对应分支，再可选 checkout 到锁定 commit（如果传了 SUSFS4KSU_COMMIT）。
+          SUSFS_BRANCH="gki-${{ github.event.inputs.ANDROID_VERSION }}-${{ github.event.inputs.KERNEL_VERSION }}"
+          git clone https://gitlab.com/simonpunk/susfs4ksu.git -b "$SUSFS_BRANCH"
+          SUSFS_PIN="${{ github.event.inputs.SUSFS4KSU_COMMIT }}"
+          if [ -n "$SUSFS_PIN" ]; then
+            echo "锁定 susfs4ksu 到 $SUSFS_PIN"
+            (cd susfs4ksu && git fetch --depth=200 origin "$SUSFS_BRANCH" && git checkout "$SUSFS_PIN")
+          fi
+          echo "susfs4ksu HEAD: $(cd susfs4ksu && git rev-parse --short HEAD)"
+
+          # ---- ShirkNeko/SukiSU_patch (github) ----
           git clone https://github.com/ShirkNeko/SukiSU_patch.git
+          PATCH_PIN="${{ github.event.inputs.SUKISU_PATCH_COMMIT }}"
+          if [ -n "$PATCH_PIN" ]; then
+            echo "锁定 SukiSU_patch 到 $PATCH_PIN"
+            (cd SukiSU_patch && git checkout "$PATCH_PIN")
+          fi
+          echo "SukiSU_patch HEAD: $(cd SukiSU_patch && git rev-parse --short HEAD)"
+
           cd kernel_platform
           echo "正在给内核打susfs补丁"
           cp ../susfs4ksu/kernel_patches/50_add_susfs_in_gki-${{ github.event.inputs.ANDROID_VERSION }}-${{ github.event.inputs.KERNEL_VERSION }}.patch ./common/
@@ -399,9 +475,18 @@ jobs:
 
       - name: Make AnyKernel3
         run: |
+          set -euo pipefail
           # 上一步 Clean workspace 已删过 AnyKernel3 兜底；这里再加 -rf 保证幂等
           rm -rf ./AnyKernel3
-          git clone https://github.com/Numbersf/AnyKernel3 --depth=1
+          # 锁 AnyKernel3 commit（默认锚定到 release 40069 验证 OK 的版本）
+          AK3_PIN="${{ github.event.inputs.ANYKERNEL3_COMMIT }}"
+          if [ -n "$AK3_PIN" ]; then
+            git clone https://github.com/Numbersf/AnyKernel3
+            (cd AnyKernel3 && git checkout "$AK3_PIN")
+          else
+            git clone https://github.com/Numbersf/AnyKernel3 --depth=1
+          fi
+          echo "AnyKernel3 HEAD: $(cd AnyKernel3 && git rev-parse --short HEAD)"
           rm -rf ./AnyKernel3/.git
 
           dir1="kernel_workspace/kernel_platform/out/msm-kernel-${{ github.event.inputs.CPUD }}-${{ github.event.inputs.BUILD_METHOD }}/dist/"
@@ -468,8 +553,17 @@ jobs:
         run: |
           # patch_linux 只需要 Image 这一个输入，输出 oImage。直接在 AnyKernel3/ 下跑，
           # 跑完用 oImage 覆盖 Image，避免和 self-hosted runner 路径强绑定。
+          # 用本地已锁版本的 SukiSU_patch/kpm/patch_linux，不再 curl raw.githubusercontent
+          # —— 后者会跟随 main HEAD 飘移，无法锁定。
+          set -euo pipefail
           cd "$GITHUB_WORKSPACE/AnyKernel3"
-          curl -LSs "https://raw.githubusercontent.com/ShirkNeko/SukiSU_patch/refs/heads/main/kpm/patch_linux" -o patch_linux
+          PATCH_LINUX="$GITHUB_WORKSPACE/kernel_workspace/SukiSU_patch/kpm/patch_linux"
+          if [ -x "$PATCH_LINUX" ] || [ -f "$PATCH_LINUX" ]; then
+            cp "$PATCH_LINUX" patch_linux
+          else
+            echo "::warning::本地 SukiSU_patch 未找到 patch_linux，回退到在线获取（不受 commit 锁定）"
+            curl -LSs "https://raw.githubusercontent.com/ShirkNeko/SukiSU_patch/refs/heads/main/kpm/patch_linux" -o patch_linux
+          fi
           chmod +x patch_linux
           ./patch_linux
           rm -f Image
