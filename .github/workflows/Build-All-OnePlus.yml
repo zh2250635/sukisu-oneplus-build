@@ -1,0 +1,496 @@
+name: Build All OnePlus SukiSU
+
+# matrix 全量构建：一次性跑所有 OnePlus 机型 / SoC，
+# 使用 self-hosted WSL runner 的本地持久化 ccache + LTO cache 加速。
+#
+# 设计要点：
+# 1. matrix 直接内嵌 JSON device list（OP 机型变化不频繁，手维护即可）
+# 2. ccache 路径：/home/hong/.cache/sukisu-ccache/<model>
+#    LTO  路径：/home/hong/.cache/sukisu-ltocache/<model>
+#    workspace 隔离：_work/<model> 让多机型不互相覆盖工作区
+# 3. max-parallel: 1 — self-hosted 32c 单机，并发会让磁盘 IO 抢崩
+# 4. 共享代码逻辑借鉴自 WildKernels build-kernel/action.yml 的 ld-wrapper 与
+#    ccache 配置，但简化为 self-hosted 本地路径（不走 release-as-cache）
+
+on:
+  workflow_dispatch:
+    inputs:
+      DEVICES:
+        type: choice
+        description: "构建机型范围"
+        required: true
+        default: "ace5_pro_only"
+        options:
+          - ace5_pro_only        # 单机型烟测
+          - sm8750_all           # 全部 sm8750 机型
+          - sm8650_all           # 全部 sm8650 机型
+          - sm8550_all           # 全部 sm8550 机型
+          - all_supported        # 全机型（耗时极长）
+      KPM:
+        type: boolean
+        description: "是否启用 KPM？"
+        required: true
+        default: true
+      VFS:
+        type: boolean
+        description: "是否启用手动钩子（VFS）？"
+        required: true
+        default: true
+      SUSFS_CI:
+        type: boolean
+        description: "下载 SUSFS 模块用 CI 构建？(false=Release)"
+        required: true
+        default: true
+      CLEAN_BUILD:
+        type: boolean
+        description: "清空 ccache 重新构建？"
+        required: true
+        default: false
+
+      # ============== 组件版本锁定 ==============
+      SUKISU_COMMIT:
+        type: string
+        description: "SukiSU-Ultra commit"
+        required: false
+        default: "678c00cad91b8c9e8a2d8d3ffe71d919812d2d10"
+      SUKISU_BRANCH:
+        type: string
+        description: "SukiSU-Ultra 分支名(setup.sh 用)"
+        required: false
+        default: "builtin"
+      SUSFS4KSU_COMMIT:
+        type: string
+        description: "simonpunk/susfs4ksu commit"
+        required: false
+        default: "f450ec00bf592d080f59b01ff6f9242456c9a427"
+      SUKISU_PATCH_COMMIT:
+        type: string
+        description: "ShirkNeko/SukiSU_patch commit"
+        required: false
+        default: "1ee91c8ec88fe3e88ea64fd5d805e0e2e072846d"
+      ANYKERNEL3_COMMIT:
+        type: string
+        description: "Numbersf/AnyKernel3 commit"
+        required: false
+        default: "80e0cc9e736572ad16c7dc539ba9b6e40749f8e7"
+
+jobs:
+  # 第一步：把字符串 input 翻译成 device 数组
+  resolve-matrix:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.set.outputs.matrix }}
+    steps:
+      - name: Generate device matrix
+        id: set
+        shell: bash
+        run: |
+          set -euo pipefail
+          DEVICES='${{ github.event.inputs.DEVICES }}'
+
+          # 完整 device 清单：每条记录有 model / cpu / cpud / android / kernel / feil
+          # cpud   是 SoC 代号 (传给 oplus_build_kernel.sh 的)
+          # feil   是 manifest 名字（不含 .xml 后缀，仍走 OnePlusOSS/kernel_manifest）
+          # 当前我们只支持 6.6（sm8750/8650/8550 系列），低版本暂未验证
+          ALL_DEVICES='[
+            {"model":"oneplus_ace5_pro","cpu":"sm8750","cpud":"sun","android":"android15","kernel":"6.6","feil":"oneplus_ace5_pro"},
+            {"model":"oneplus_13",      "cpu":"sm8750","cpud":"sun","android":"android15","kernel":"6.6","feil":"oneplus_13"},
+            {"model":"oneplus_13t",     "cpu":"sm8750","cpud":"sun","android":"android15","kernel":"6.6","feil":"oneplus_13t"},
+            {"model":"oneplus_13s",     "cpu":"sm8750","cpud":"sun","android":"android15","kernel":"6.6","feil":"oneplus_13s"},
+            {"model":"oneplus_pad_2_pro","cpu":"sm8750","cpud":"sun","android":"android15","kernel":"6.6","feil":"oneplus_pad_2_pro"},
+            {"model":"oneplus_pad_3",   "cpu":"sm8750","cpud":"sun","android":"android15","kernel":"6.6","feil":"oneplus_pad_3"},
+
+            {"model":"oneplus_12",      "cpu":"sm8650","cpud":"pineapple","android":"android14","kernel":"6.1","feil":"oneplus_12_v"},
+            {"model":"oneplus_13r",     "cpu":"sm8650","cpud":"pineapple","android":"android14","kernel":"6.1","feil":"oneplus_13r"},
+            {"model":"oneplus_ace3_pro","cpu":"sm8650","cpud":"pineapple","android":"android14","kernel":"6.1","feil":"oneplus_ace3_pro_v"},
+            {"model":"oneplus_ace5",    "cpu":"sm8650","cpud":"pineapple","android":"android14","kernel":"6.1","feil":"oneplus_ace5"},
+
+            {"model":"oneplus_11",      "cpu":"sm8550","cpud":"kalama","android":"android13","kernel":"5.15","feil":"oneplus_11_v"},
+            {"model":"oneplus_ace2_pro","cpu":"sm8550","cpud":"kalama","android":"android13","kernel":"5.15","feil":"oneplus_ace2_pro_v"},
+            {"model":"oneplus_open",    "cpu":"sm8550","cpud":"kalama","android":"android13","kernel":"5.15","feil":"oneplus_open_v"}
+          ]'
+
+          case "$DEVICES" in
+            ace5_pro_only) FILTER='.[] | select(.model == "oneplus_ace5_pro")' ;;
+            sm8750_all)    FILTER='.[] | select(.cpu == "sm8750")' ;;
+            sm8650_all)    FILTER='.[] | select(.cpu == "sm8650")' ;;
+            sm8550_all)    FILTER='.[] | select(.cpu == "sm8550")' ;;
+            all_supported) FILTER='.[]' ;;
+            *) echo "::error::unknown DEVICES=$DEVICES"; exit 1 ;;
+          esac
+
+          MATRIX=$(echo "$ALL_DEVICES" | jq -c "[$FILTER]")
+          echo "Selected devices:"
+          echo "$MATRIX" | jq -r '.[] | "  - \(.model) (\(.cpu)/\(.cpud), \(.android)-\(.kernel))"'
+          # GitHub Actions matrix 要求 {include: [...]}
+          WRAPPED=$(jq -nc --argjson items "$MATRIX" '{include: $items}')
+          echo "matrix=$WRAPPED" >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: resolve-matrix
+    name: ${{ matrix.model }} (${{ matrix.cpu }})
+    runs-on: [self-hosted, linux, x64, wsl, kernel-builder]
+    strategy:
+      fail-fast: false
+      max-parallel: 1   # self-hosted 单机，串行跑避免 ccache/磁盘抢锁
+      matrix: ${{ fromJSON(needs.resolve-matrix.outputs.matrix) }}
+
+    env:
+      # 每个 device 独立 workspace + ccache，避免 matrix 串行时互相污染
+      DEVICE_WORK: /home/hong/sukisu-build/${{ matrix.model }}
+      CCACHE_DIR:  /home/hong/.cache/sukisu-ccache/${{ matrix.model }}
+      LDCACHE_DIR: /home/hong/.cache/sukisu-ltocache/${{ matrix.model }}
+
+    steps:
+      - name: Show matrix entry
+        run: |
+          echo "model: ${{ matrix.model }}"
+          echo "cpu: ${{ matrix.cpu }}"
+          echo "cpud: ${{ matrix.cpud }}"
+          echo "android: ${{ matrix.android }}"
+          echo "kernel: ${{ matrix.kernel }}"
+          echo "feil: ${{ matrix.feil }}"
+          echo "DEVICE_WORK=$DEVICE_WORK"
+          echo "CCACHE_DIR=$CCACHE_DIR"
+          echo "LDCACHE_DIR=$LDCACHE_DIR"
+
+      - name: Optionally clean caches
+        if: ${{ github.event.inputs.CLEAN_BUILD == 'true' }}
+        run: |
+          echo "::warning::CLEAN_BUILD=true，清空 ccache + LTO cache"
+          rm -rf "$CCACHE_DIR" "$LDCACHE_DIR"
+
+      - name: Prepare device workspace
+        run: |
+          set -euo pipefail
+          mkdir -p "$DEVICE_WORK" "$CCACHE_DIR" "$LDCACHE_DIR"
+          # 清掉上次 device workspace 内的旧 kernel_workspace 防止重复 sync 卡死
+          rm -rf "$DEVICE_WORK/kernel_workspace" "$DEVICE_WORK/AnyKernel3"
+          # 把 patches/ 目录拷过去（hmbird_patch 等）
+          mkdir -p "$DEVICE_WORK/patches"
+
+      - name: Checkout repo into ./action-source
+        uses: actions/checkout@v4
+        with:
+          path: action-source
+
+      - name: Stage local files into device workspace
+        run: |
+          set -euo pipefail
+          cp -rf "$GITHUB_WORKSPACE/action-source/patches"/* "$DEVICE_WORK/patches/" || true
+          ls "$DEVICE_WORK/patches/"
+
+      - name: Configure Git
+        run: |
+          git config --global user.name "Numbersf"
+          git config --global user.email "263623064@qq.com"
+
+      - name: Install repo tool
+        run: |
+          if ! command -v repo >/dev/null; then
+            curl https://storage.googleapis.com/git-repo-downloads/repo > /tmp/repo
+            chmod +x /tmp/repo
+            sudo mv /tmp/repo /usr/local/bin/repo
+          fi
+          repo --version | head -1
+
+      - name: Initialize repo and sync
+        working-directory: ${{ env.DEVICE_WORK }}
+        run: |
+          mkdir -p kernel_workspace
+          cd kernel_workspace
+          repo init -u https://github.com/OnePlusOSS/kernel_manifest.git \
+            -b refs/heads/oneplus/${{ matrix.cpu }} \
+            -m ${{ matrix.feil }}.xml --depth=1
+          repo sync -c -j$(nproc) --no-clone-bundle --no-tags
+
+      - name: Force remove -dirty suffix
+        working-directory: ${{ env.DEVICE_WORK }}/kernel_workspace
+        run: |
+          cd kernel_platform
+          for f in ./common/scripts/setlocalversion ./msm-kernel/scripts/setlocalversion ./external/dtc/scripts/setlocalversion; do
+            [ -f "$f" ] || continue
+            sed -i 's/ -dirty//g' "$f"
+          done
+
+      - name: Add KernelSU-SukiSU Ultra
+        working-directory: ${{ env.DEVICE_WORK }}/kernel_workspace
+        run: |
+          set -euo pipefail
+          cd kernel_platform
+          # SukiSU 锁 commit 注入
+          curl -LSs "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/${{ github.event.inputs.SUKISU_COMMIT }}/kernel/setup.sh" | \
+            bash -s "${{ github.event.inputs.SUKISU_BRANCH }}"
+          cd ./KernelSU
+          KSU_VERSION=$(expr $(/usr/bin/git rev-list --count main 2>/dev/null || /usr/bin/git rev-list --count HEAD) "+" 10606)
+          export KSUVER=$KSU_VERSION
+          echo "KSUVER=$KSU_VERSION" >> "$GITHUB_ENV"
+          sed -i "s/DKSU_VERSION=12800/DKSU_VERSION=${KSU_VERSION}/" kernel/Makefile
+
+      - name: Apply Patches SukiSU Ultra (susfs + SukiSU_patch)
+        working-directory: ${{ env.DEVICE_WORK }}/kernel_workspace
+        run: |
+          set -euo pipefail
+          # susfs4ksu (gitlab) 锁 commit
+          SUSFS_BRANCH="gki-${{ matrix.android }}-${{ matrix.kernel }}"
+          git clone https://gitlab.com/simonpunk/susfs4ksu.git -b "$SUSFS_BRANCH"
+          (cd susfs4ksu && \
+           git fetch --depth=200 origin "$SUSFS_BRANCH" && \
+           git checkout "${{ github.event.inputs.SUSFS4KSU_COMMIT }}")
+
+          # SukiSU_patch (github) 锁 commit
+          git clone https://github.com/ShirkNeko/SukiSU_patch.git
+          (cd SukiSU_patch && git checkout "${{ github.event.inputs.SUKISU_PATCH_COMMIT }}")
+
+          cd kernel_platform
+          cp ../susfs4ksu/kernel_patches/50_add_susfs_in_gki-${{ matrix.android }}-${{ matrix.kernel }}.patch ./common/
+          cp ../susfs4ksu/kernel_patches/fs/* ./common/fs/
+          cp ../susfs4ksu/kernel_patches/include/linux/* ./common/include/linux/
+
+          cd ./common
+          patch -p1 < 50_add_susfs_in_gki-${{ matrix.android }}-${{ matrix.kernel }}.patch || true
+
+      - name: Apply Hide Stuff Patches
+        working-directory: ${{ env.DEVICE_WORK }}/kernel_workspace
+        run: |
+          cd kernel_platform/common
+          cp ../../SukiSU_patch/69_hide_stuff.patch ./
+          patch -p1 -F 3 < 69_hide_stuff.patch
+
+      # OGKI -> GKI 转换（sm8750/sm8850 等 HMBIRD_OGKI 机型必须）
+      - name: Apply Convert HMBIRD_OGKI to HMBIRD_GKI
+        if: ${{ matrix.kernel == '6.6' || matrix.kernel == '6.12' }}
+        working-directory: ${{ env.DEVICE_WORK }}/kernel_workspace
+        run: |
+          set -euo pipefail
+          PATCH_FILE="$DEVICE_WORK/patches/hmbird_patch.patch"
+          if [ ! -f "$PATCH_FILE" ]; then
+            echo "::error::找不到 $PATCH_FILE"; exit 1
+          fi
+          cd kernel_platform/common
+          for p in ./kernel/sched/hmbird* ./vendor/oplus/kernel/cpu/sched_ext/hmbird*; do
+            [ -d "$p" ] && { echo "源码已有 hmbird，跳过"; exit 0; }
+          done
+          if ! grep -q '^obj-y += hmbird_patch.o' drivers/Makefile; then
+            sed -i '1iobj-y += hmbird_patch.o' drivers/Makefile
+          fi
+          patch -p1 -F 3 < "$PATCH_FILE"
+
+      - name: Apply LSM_BBG (Baseband Guard)
+        working-directory: ${{ env.DEVICE_WORK }}/kernel_workspace
+        run: |
+          set -euo pipefail
+          cd kernel_platform/common
+          curl -LSs https://raw.githubusercontent.com/vc-teahouse/Baseband-guard/main/setup.sh | bash
+          sed -i '/^config LSM$/,/^help$/{ /^[[:space:]]*default/ { /baseband_guard/! s/selinux/selinux,baseband_guard/ } }' ./security/Kconfig
+
+      - name: Add Configuration Settings
+        working-directory: ${{ env.DEVICE_WORK }}/kernel_workspace
+        run: |
+          set -euo pipefail
+          cd kernel_platform
+          CONFIG_FILE=./common/arch/arm64/configs/gki_defconfig
+
+          echo "CONFIG_KSU=y" >> "$CONFIG_FILE"
+          echo "CONFIG_KPM=y" >> "$CONFIG_FILE"
+
+          # 手动 VFS 钩子（VFS=true）：开 CONFIG_KSU_MANUAL_HOOK
+          if [ "${{ github.event.inputs.VFS }}" = "true" ]; then
+            echo "CONFIG_KSU_MANUAL_HOOK=y" >> "$CONFIG_FILE"
+          fi
+
+          # SUSFS（对齐 release 40069 strings 反推：不开 SUS_SU/MAGIC_MOUNT，开 SUS_MAP）
+          echo "CONFIG_KSU_SUSFS=y" >> "$CONFIG_FILE"
+          echo "CONFIG_KSU_SUSFS_HAS_MAGIC_MOUNT=n" >> "$CONFIG_FILE"
+          echo "CONFIG_KSU_SUSFS_SUS_PATH=y" >> "$CONFIG_FILE"
+          echo "CONFIG_KSU_SUSFS_SUS_MOUNT=y" >> "$CONFIG_FILE"
+          echo "CONFIG_KSU_SUSFS_AUTO_ADD_SUS_KSU_DEFAULT_MOUNT=y" >> "$CONFIG_FILE"
+          echo "CONFIG_KSU_SUSFS_AUTO_ADD_SUS_BIND_MOUNT=y" >> "$CONFIG_FILE"
+          echo "CONFIG_KSU_SUSFS_SUS_KSTAT=y" >> "$CONFIG_FILE"
+          echo "CONFIG_KSU_SUSFS_SUS_MAP=y" >> "$CONFIG_FILE"
+          echo "CONFIG_KSU_SUSFS_SUS_OVERLAYFS=n" >> "$CONFIG_FILE"
+          echo "CONFIG_KSU_SUSFS_SUS_SU=n" >> "$CONFIG_FILE"
+          echo "CONFIG_KSU_SUSFS_TRY_UMOUNT=y" >> "$CONFIG_FILE"
+          echo "CONFIG_KSU_SUSFS_AUTO_ADD_TRY_UMOUNT_FOR_BIND_MOUNT=y" >> "$CONFIG_FILE"
+          echo "CONFIG_KSU_SUSFS_SPOOF_UNAME=y" >> "$CONFIG_FILE"
+          echo "CONFIG_KSU_SUSFS_ENABLE_LOG=y" >> "$CONFIG_FILE"
+          echo "CONFIG_KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS=y" >> "$CONFIG_FILE"
+          echo "CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG=y" >> "$CONFIG_FILE"
+          echo "CONFIG_KSU_SUSFS_OPEN_REDIRECT=y" >> "$CONFIG_FILE"
+
+          # 关 check_defconfig 严格校验
+          sed -i 's/check_defconfig//' ./common/build.config.gki || true
+
+      # ====================== Build Kernel（带 ccache + LTO cache） ======================
+      - name: Setup ccache & ld-wrapper
+        working-directory: ${{ env.DEVICE_WORK }}/kernel_workspace
+        run: |
+          set -euo pipefail
+          # ccache 配置（参考 WildKernels build-kernel/action.yml）
+          # CCACHE_DIR 已 export 给后续步骤。max 12G 单机型上限。
+          if ! command -v ccache >/dev/null; then
+            sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends ccache
+          fi
+          ccache --max-size=12G
+          ccache --set-config=compression=true
+          ccache --set-config=compression_level=3
+          ccache --set-config=compiler_check=content
+          ccache --set-config=sloppiness=file_macro,time_macros,include_file_mtime,include_file_ctime,pch_defines,system_headers,locale
+          ccache --set-config=base_dir="$DEVICE_WORK"
+          ccache -s | head -10
+
+          # 写一个 ld-wrapper：调 ld.lld 并注入 thinlto-cache-dir
+          # 为 absolute path，能让 make 各子目录都能找到
+          WRAPPER="$DEVICE_WORK/ld-wrapper"
+          cat > "$WRAPPER" <<EOF
+          #!/bin/bash
+          exec ld.lld "\$@" --thinlto-cache-dir="$LDCACHE_DIR" --thinlto-jobs=$(nproc --all)
+          EOF
+          chmod +x "$WRAPPER"
+          echo "✅ ld-wrapper: $WRAPPER"
+          echo "LD_WRAPPER=$WRAPPER" >> "$GITHUB_ENV"
+
+      - name: Build kernel
+        working-directory: ${{ env.DEVICE_WORK }}/kernel_workspace
+        run: |
+          set -euo pipefail
+          cd kernel_platform
+
+          # ---- 探测 prebuilts ----
+          CLANG_PARENT=$(find . -maxdepth 1 -type d -name 'prebuilts*' -exec test -d '{}/clang/host/linux-x86' \; -print | head -1)
+          KBT_PARENT=$(find . -maxdepth 1 -type d -name 'prebuilts*' -exec test -d '{}/kernel-build-tools' \; -print | head -1)
+          [ -z "$CLANG_PARENT" ] && { echo "::error::missing prebuilts*/clang"; exit 13; }
+          CLANG_PARENT="${CLANG_PARENT#./}"; KBT_PARENT="${KBT_PARENT#./}"
+
+          CLANG_VERSION=""
+          for f in ./common/build.config.common ./common/build.config.constants; do
+            [ -f "$f" ] || continue
+            v=$(grep -E '^(CLANG_VERSION|CLANG_PREBUILT_BIN)=' "$f" | head -1 || true)
+            if [[ "$v" =~ clang-(r[0-9a-z]+) ]]; then CLANG_VERSION="${BASH_REMATCH[1]}"; break; fi
+            if [[ "$v" =~ ^CLANG_VERSION=(r[0-9a-z]+) ]]; then CLANG_VERSION="${BASH_REMATCH[1]}"; break; fi
+          done
+          [ -z "$CLANG_VERSION" ] && CLANG_VERSION=$(ls -1 "$CLANG_PARENT/clang/host/linux-x86" 2>/dev/null | grep -E '^clang-r[0-9a-z]+$' | head -1 | sed 's/^clang-//')
+          [ -z "$CLANG_VERSION" ] && { echo "::error::CLANG_VERSION not detected"; exit 13; }
+          echo "✅ CLANG_VERSION=$CLANG_VERSION"
+
+          CLANG_BIN="$DEVICE_WORK/kernel_workspace/kernel_platform/$CLANG_PARENT/clang/host/linux-x86/clang-$CLANG_VERSION/bin"
+          PAHOLE_BIN="$DEVICE_WORK/kernel_workspace/kernel_platform/$KBT_PARENT/kernel-build-tools/linux-x86/bin/pahole"
+          [ -x "$CLANG_BIN/clang" ] || { echo "::error::no clang at $CLANG_BIN"; exit 13; }
+          [ -x "$PAHOLE_BIN" ] || PAHOLE_BIN=$(command -v pahole || true)
+          [ -z "$PAHOLE_BIN" ] && { echo "::error::no pahole"; exit 13; }
+
+          export PATH="$CLANG_BIN:/usr/lib/ccache:$PATH"
+          clang --version | head -1
+
+          cd ./common
+          COMMON_REAL=$(pwd -P)
+          KCFLAGS="-fdebug-prefix-map=$DEVICE_WORK=. -fmacro-prefix-map=$DEVICE_WORK=. -ffile-prefix-map=$DEVICE_WORK=. -no-canonical-prefixes -Wno-error -pipe -D__ANDROID_COMMON_KERNEL__"
+
+          # 针对 sm8750/sm8845/sm8850（Cortex-Oryon-1）开启 CPU 特化优化
+          case "${{ matrix.cpu }}" in
+            sm8750|sm8845|sm8850) KCFLAGS="-mcpu=oryon-1 $KCFLAGS" ;;
+          esac
+
+          MAKE_ARGS=(
+            LLVM=1
+            ARCH=arm64
+            CROSS_COMPILE=aarch64-linux-gnu-
+            CC="ccache clang"
+            HOSTCC="ccache clang"
+            HOSTLD="$LD_WRAPPER"
+            LD="$LD_WRAPPER"
+            PAHOLE="$PAHOLE_BIN"
+            KCFLAGS="$KCFLAGS"
+          )
+
+          # ccache 预热（首次构建时跑一遍 headers_install prepare 让 ccache 落到稳定状态）
+          if [ -z "$(find "$CCACHE_DIR" -type f 2>/dev/null | head -n1)" ]; then
+            echo "🔥 priming ccache: headers_install prepare"
+            make O=out "${MAKE_ARGS[@]}" headers_install prepare 2>&1 | tail -5 || true
+          fi
+
+          ccache -z
+          BUILD_START=$(date +%s)
+          make O=out "${MAKE_ARGS[@]}" gki_defconfig --no-print-directory
+          make O=out "${MAKE_ARGS[@]}" olddefconfig --no-print-directory
+          make -j"$(nproc --all)" O=out "${MAKE_ARGS[@]}"
+          BUILD_END=$(date +%s)
+          echo "::notice::${{ matrix.model }} build duration: $((BUILD_END - BUILD_START))s"
+
+          IMG="$COMMON_REAL/out/arch/arm64/boot/Image"
+          [ -s "$IMG" ] || { echo "::error::no Image"; exit 1; }
+          echo "::notice::${{ matrix.model }} Image: $(stat -c%s "$IMG")B"
+
+          echo "===== ccache stats ====="
+          ccache -s | head -25 || true
+
+      - name: Make AnyKernel3
+        working-directory: ${{ env.DEVICE_WORK }}
+        run: |
+          set -euo pipefail
+          rm -rf AnyKernel3
+          AK3_PIN="${{ github.event.inputs.ANYKERNEL3_COMMIT }}"
+          if [ -n "$AK3_PIN" ]; then
+            git clone https://github.com/Numbersf/AnyKernel3
+            (cd AnyKernel3 && git checkout "$AK3_PIN")
+          else
+            git clone https://github.com/Numbersf/AnyKernel3 --depth=1
+          fi
+          rm -rf ./AnyKernel3/.git
+
+          IMG="$DEVICE_WORK/kernel_workspace/kernel_platform/common/out/arch/arm64/boot/Image"
+          [ -f "$IMG" ] || IMG=$(find "$DEVICE_WORK/kernel_workspace/kernel_platform/common/out/" -name Image -type f 2>/dev/null | head -1)
+          [ -f "$IMG" ] || { echo "::error::no Image"; exit 1; }
+          cp "$IMG" ./AnyKernel3/Image
+
+      - name: Apply patch_linux (KPM)
+        if: ${{ github.event.inputs.KPM == 'true' }}
+        working-directory: ${{ env.DEVICE_WORK }}/AnyKernel3
+        run: |
+          set -euo pipefail
+          PATCH_LINUX="$DEVICE_WORK/kernel_workspace/SukiSU_patch/kpm/patch_linux"
+          if [ -x "$PATCH_LINUX" ] || [ -f "$PATCH_LINUX" ]; then
+            cp "$PATCH_LINUX" patch_linux
+          else
+            echo "::warning::no local patch_linux, fallback to raw.githubusercontent"
+            curl -LSs "https://raw.githubusercontent.com/ShirkNeko/SukiSU_patch/refs/heads/main/kpm/patch_linux" -o patch_linux
+          fi
+          chmod +x patch_linux
+          ./patch_linux
+          rm -f Image
+          mv oImage Image
+
+      - name: Download SUSFS module (CI)
+        if: ${{ github.event.inputs.SUSFS_CI == 'true' }}
+        working-directory: ${{ env.DEVICE_WORK }}/AnyKernel3
+        run: |
+          set -euo pipefail
+          LATEST_RUN_ID=$(curl -s -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+            "https://api.github.com/repos/sidex15/susfs4ksu-module/actions/runs?status=success" | \
+            jq -r '.workflow_runs[] | select(.head_branch == "v1.5.2+") | .id' | head -1)
+          [ -n "$LATEST_RUN_ID" ] || { echo "::warning::no susfs CI run found"; exit 0; }
+          ARTIFACT_URL=$(curl -s -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+            "https://api.github.com/repos/sidex15/susfs4ksu-module/actions/runs/$LATEST_RUN_ID/artifacts" | \
+            jq -r '.artifacts[0].archive_download_url')
+          curl -L -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" -o ksu_module_susfs.zip "$ARTIFACT_URL"
+
+      - name: Download SUSFS module (Release)
+        if: ${{ github.event.inputs.SUSFS_CI == 'false' }}
+        working-directory: ${{ env.DEVICE_WORK }}/AnyKernel3
+        run: |
+          wget -q https://github.com/sidex15/ksu_module_susfs/releases/latest/download/ksu_module_susfs_1.5.2+.zip -O ksu_module_susfs.zip
+
+      - name: Upload AnyKernel3 artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: AK3_${{ matrix.model }}_${{ matrix.cpu }}_SukiSU_${{ env.KSUVER }}${{ github.event.inputs.KPM == 'true' && '_KPM' || '' }}${{ github.event.inputs.VFS == 'true' && '_VFS' || '' }}
+          path: ${{ env.DEVICE_WORK }}/AnyKernel3/*
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Cleanup workspace (keep ccache)
+        if: always()
+        run: |
+          # 保留 ccache / LTO cache，删 kernel_workspace + AnyKernel3 节省磁盘
+          rm -rf "$DEVICE_WORK/kernel_workspace" "$DEVICE_WORK/AnyKernel3" "$DEVICE_WORK/patches"
+          du -sh "$CCACHE_DIR" "$LDCACHE_DIR" 2>/dev/null || true
