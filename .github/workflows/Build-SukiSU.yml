@@ -129,17 +129,17 @@ on:
         type: string
         description: "simonpunk/susfs4ksu commit (留空=对应分支 HEAD)"
         required: false
-        default: "0269bced"
+        default: "0269bced2c7396078d02e4975e68a7996b31d479"
       SUKISU_PATCH_COMMIT:
         type: string
         description: "ShirkNeko/SukiSU_patch commit (留空=main HEAD)"
         required: false
-        default: "547ae94bf6648a73c5ed8d3a9e2be62dc31b7d12"
+        default: "547ae94bcaec53d030398f857950c64662043a5d"
       ANYKERNEL3_COMMIT:
         type: string
         description: "Numbersf/AnyKernel3 commit (留空=main HEAD)"
         required: false
-        default: "40f5e86a"
+        default: "40f5e86afc8f765940bee25ed85418e387af8590"
 
 jobs:
   build:
