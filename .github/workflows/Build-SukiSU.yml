@@ -125,21 +125,28 @@ on:
         description: "SukiSU-Ultra 分支名(setup.sh 用，决定 KSU_VERSION 计数基准)"
         required: false
         default: "builtin"
+      # 默认值全部锚定到 release 40069（2025-11-08）发布当时的快照：
+      #   - susfs4ksu  f450ec00 (2025-10-23): 与 SukiSU 678c00ca 接口匹配
+      #     （新版 0269bced / f9c3df09 把 susfs_add_sus_path 等签名从
+      #      `int f(struct st_susfs_sus_path __user*)` 改成
+      #      `void f(void __user **)`，与 678c00ca 的 core_hook.c 调用不兼容）
+      #   - SukiSU_patch 1ee91c8e (2025-11-08 12:00): release 40069 当天最新
+      #   - AnyKernel3   80e0cc9e (2025-11-07): release 40069 前一天
       SUSFS4KSU_COMMIT:
         type: string
         description: "simonpunk/susfs4ksu commit (留空=对应分支 HEAD)"
         required: false
-        default: "0269bced2c7396078d02e4975e68a7996b31d479"
+        default: "f450ec00bf592d080f59b01ff6f9242456c9a427"
       SUKISU_PATCH_COMMIT:
         type: string
         description: "ShirkNeko/SukiSU_patch commit (留空=main HEAD)"
         required: false
-        default: "547ae94bcaec53d030398f857950c64662043a5d"
+        default: "1ee91c8ec88fe3e88ea64fd5d805e0e2e072846d"
       ANYKERNEL3_COMMIT:
         type: string
-        description: "Numbersf/AnyKernel3 commit (留空=main HEAD)"
+        description: "Numbersf/AnyKernel3 commit (留空=master HEAD)"
         required: false
-        default: "40f5e86afc8f765940bee25ed85418e387af8590"
+        default: "80e0cc9e736572ad16c7dc539ba9b6e40749f8e7"
 
 jobs:
   build:
