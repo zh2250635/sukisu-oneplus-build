@@ -178,6 +178,21 @@ jobs:
       - name: 🧹 Disk cleanup (free ~30GB)
         uses: ./action-source/.github/actions/disk-cleanup
 
+      - name: 💾 Setup 16G swap (mitigate vmlinux LTO link OOM)
+        # GitHub-hosted runner 默认 7GB RAM + ~4GB swap, sm8550 (5.15) 的 vmlinux
+        # ThinLTO link 阶段会 OOM 被 cgroup 杀。补足 swap 到 16G 让 link 撑过去。
+        run: |
+          set -euo pipefail
+          sudo swapoff -a || true
+          sudo rm -f /mnt/swapfile /swapfile || true
+          sudo fallocate -l 16G /mnt/swapfile
+          sudo chmod 600 /mnt/swapfile
+          sudo mkswap /mnt/swapfile
+          sudo swapon /mnt/swapfile
+          # 鼓励 kernel 尽早把脏页换出 (LTO 内存峰值时常被压力 reclaim)
+          echo 100 | sudo tee /proc/sys/vm/swappiness
+          free -h
+
       - name: Install build dependencies
         run: |
           set -euo pipefail
@@ -200,10 +215,13 @@ jobs:
           ccache --set-config=sloppiness=file_macro,time_macros,include_file_mtime,include_file_ctime,pch_defines,system_headers,locale
 
           # ld-wrapper 注入 thinlto-cache-dir
+          # 限制 thinlto-jobs 数, 防止 vmlinux 链接阶段 OOM (sm8550/sm8650 在 4 jobs 已观察到)
           WRAPPER="${{ github.workspace }}/ld-wrapper"
+          THINLTO_JOBS=$(( $(nproc --all) / 2 ))
+          [ "$THINLTO_JOBS" -lt 2 ] && THINLTO_JOBS=2
           cat > "$WRAPPER" <<EOF
           #!/bin/bash
-          exec ld.lld "\$@" --thinlto-cache-dir="$LDCACHE_DIR" --thinlto-jobs=$(nproc --all)
+          exec ld.lld "\$@" --thinlto-cache-dir="$LDCACHE_DIR" --thinlto-jobs=$THINLTO_JOBS
           EOF
           chmod +x "$WRAPPER"
           echo "LD_WRAPPER=$WRAPPER" >> "$GITHUB_ENV"
