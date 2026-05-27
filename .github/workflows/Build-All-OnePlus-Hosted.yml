@@ -55,30 +55,30 @@ on:
         type: string
         description: "SukiSU-Ultra commit"
         required: false
-        default: "678c00cad91b8c9e8a2d8d3ffe71d919812d2d10"
+        default: "c370168373a44a9c43c1cd8df8c906f1c6c9e4d1"
       SUKISU_BRANCH:
         type: string
         description: "SukiSU-Ultra 分支名 (setup.sh 用)"
         required: false
-        default: "builtin"
+        default: "main"
       SUSFS4KSU_COMMIT:
         type: string
         description: "simonpunk/susfs4ksu commit (留空 = 用 SUSFS 分支 HEAD; 仅对 6.6 推荐锁 commit)"
         required: false
-        default: "f450ec00bf592d080f59b01ff6f9242456c9a427"
+        default: ""
       SUSFS4KSU_COMMIT_ANDROID15_6_6:
         type: string
-        description: "android15-6.6 专用 SUSFS commit (覆盖上面的)"
+        description: "android15-6.6 专用 SUSFS commit (留空 = 分支 HEAD, 即 v2.1.0)"
         required: false
-        default: "f450ec00bf592d080f59b01ff6f9242456c9a427"
+        default: ""
       SUSFS4KSU_COMMIT_ANDROID14_6_1:
         type: string
-        description: "android14-6.1 专用 SUSFS commit (留空 = 分支 HEAD)"
+        description: "android14-6.1 专用 SUSFS commit (留空 = 分支 HEAD, 即 v2.1.0)"
         required: false
         default: ""
       SUSFS4KSU_COMMIT_ANDROID13_5_15:
         type: string
-        description: "android13-5.15 专用 SUSFS commit (留空 = 分支 HEAD)"
+        description: "android13-5.15 专用 SUSFS commit (留空 = 分支 HEAD, 即 v2.1.0)"
         required: false
         default: ""
       SUKISU_PATCH_COMMIT:
