@@ -55,7 +55,7 @@ on:
         type: string
         description: "SukiSU-Ultra commit"
         required: false
-        default: "c370168373a44a9c43c1cd8df8c906f1c6c9e4d1"
+        default: "c3701683733ff608f3284762cc5a864d3c162d9b"
       SUKISU_BRANCH:
         type: string
         description: "SukiSU-Ultra 分支名 (setup.sh 用)"
