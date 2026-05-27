@@ -315,7 +315,22 @@ jobs:
           cp ../susfs4ksu/kernel_patches/include/linux/* ./common/include/linux/
 
           cd ./common
-          patch -p1 < 50_add_susfs_in_gki-${{ matrix.android_version }}-${{ matrix.kernel_version }}.patch || true
+          # -F 3 加大 fuzz, 容忍 OnePlus 源码上下文偏移; || true 保留兼容 (有些 hunk 必失败但不致命)
+          patch -p1 -F 3 < 50_add_susfs_in_gki-${{ matrix.android_version }}-${{ matrix.kernel_version }}.patch || true
+
+      - name: Post-patch SUSFS fixups (include + vma decl)
+        working-directory: ${{ env.WORKDIR }}
+        run: |
+          # SUSFS patch 在多个机型上有 hunk fail (OnePlus 源码上下文差异):
+          #   - fs/proc/base.c       Hunk#1 漏 #include <linux/susfs_def.h>
+          #     -> SUSFS_IS_INODE_OPEN_REDIRECT / SUSFS_IS_INODE_SUS_MAP undeclared
+          #   - mm/memory.c          Hunk#1 漏同样 include
+          #     -> SUSFS_IS_INODE_SUS_MAP undeclared
+          #   - fs/proc/task_mmu.c   Hunk#6 漏 `struct vm_area_struct *vma;` 局部声明
+          #     -> use of undeclared identifier 'vma' (pagemap_read)
+          # 用 python3 做幂等兜底, 已经 patch 成功的设备不会被改第二次。
+          set -euo pipefail
+          python3 ${{ github.workspace }}/action-source/scripts/susfs-fixup.py kernel_platform/common
 
       - name: Apply Hide Stuff Patches
         working-directory: ${{ env.WORKDIR }}
